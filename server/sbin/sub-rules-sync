@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# 把自维护的 Clash 规则列表从本地 git 工作副本发布到 Nginx 可读的目录。
+#
+# 由 sub-rules-sync.timer 每分钟调用，也可手工执行（push 后想立刻生效时）。
+#
+# 设计要点：
+#   - 拉取用 fetch + merge --ff-only：分叉或本地有未提交改动时**拒绝**而不是销毁，
+#     因为 REPO_DIR 是你可能直接编辑规则的工作副本，不是只读镜像。
+#   - 网络失败不算致命：仓库工作副本仍在，照常发布最后一份已知良好的内容，
+#     规则端点不会因为 GitHub 抽风而降级。
+#   - 先全部校验，再全部发布：避免一个文件坏掉时发布出半套规则。
+#   - 发布走临时文件 + mv，保证 Nginx 永远读到完整文件，不会撞上写到一半的内容。
+#
+# 用法： sub-rules-sync [-v]
+
+set -euo pipefail
+
+REPO_DIR=/root/code/shadowrocket-config
+PUBLISH_DIR=/var/lib/sub-rules
+BRANCH=main
+FILES=(ChinaDirect.list Reject.list)
+STAMP="$PUBLISH_DIR/.last-sync"
+
+verbose=0
+[[ ${1:-} == -v ]] && verbose=1
+
+log()  { [[ $verbose -eq 1 ]] && printf '%s\n' "$*" || true; }
+warn() { printf '警告：%s\n' "$*" >&2; }
+fail() { printf '错误：%s\n' "$*" >&2; exit 1; }
+
+[[ -d $REPO_DIR/.git ]] || fail "git 工作副本不存在：$REPO_DIR"
+[[ -d $PUBLISH_DIR ]]   || fail "发布目录不存在：$PUBLISH_DIR"
+
+# ---- 1. 拉取（失败不致命，继续用工作副本里的内容发布）----
+fetched=0
+if git -C "$REPO_DIR" fetch --quiet --prune origin "$BRANCH" 2>/dev/null; then
+    if git -C "$REPO_DIR" merge --quiet --ff-only "origin/$BRANCH" 2>/dev/null; then
+        fetched=1
+        log "已同步到 origin/$BRANCH： $(git -C "$REPO_DIR" log --oneline -1)"
+    else
+        warn "无法快进合并——工作副本有本地提交或未提交改动，已跳过合并。" \
+             "先在 $REPO_DIR 处理干净（git status），否则规则将停留在当前版本。"
+    fi
+else
+    warn "git fetch 失败（网络或 GitHub 不可达），本次沿用工作副本内容。"
+fi
+
+# ---- 2. 全部校验后再发布，避免半套规则 ----
+for f in "${FILES[@]}"; do
+    src="$REPO_DIR/rules/$f"
+    [[ -s $src ]] || fail "源文件缺失或为空，拒绝发布：$src"
+    # 至少要有一条形如 DOMAIN-SUFFIX,example.com 的规则行，挡住被清空/截断的文件
+    grep -qE '^[A-Z][A-Z0-9-]*,' "$src" \
+        || fail "源文件不含任何规则行，疑似损坏，拒绝发布：$src"
+done
+
+changed=0
+for f in "${FILES[@]}"; do
+    src="$REPO_DIR/rules/$f"
+    dst="$PUBLISH_DIR/$f"
+    if ! cmp -s "$src" "$dst" 2>/dev/null; then
+        install -m 0644 -o root -g root "$src" "$dst.tmp"
+        mv -f "$dst.tmp" "$dst"
+        changed=1
+        printf '已发布 %s（%s 行）\n' "$f" "$(grep -c '' "$dst")"
+    fi
+done
+
+# ---- 3. 记录最后一次成功拉取的时刻 ----
+# 与文件 mtime 分开：mtime 只在内容变化时才动，无法回答「同步器还活着吗」。
+if [[ $fetched -eq 1 ]]; then
+    date -u +%s > "$STAMP.tmp" && mv -f "$STAMP.tmp" "$STAMP"
+    chmod 0644 "$STAMP"
+fi
+
+if [[ $changed -eq 0 ]]; then
+    log "规则无变化。"
+fi
+
+exit 0

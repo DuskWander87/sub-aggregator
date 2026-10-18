@@ -1,0 +1,21 @@
+[Unit]
+Description=Sync self-maintained rule lists from GitHub to the publish dir
+Documentation=file:///root/code/3x/docs/sub/operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sub-rules-sync
+Environment=HOME=/root
+
+# 只需要读 git 工作副本、写工作副本的 .git 与发布目录，其余文件系统只读。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/root/code/shadowrocket-config /var/lib/sub-rules
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true

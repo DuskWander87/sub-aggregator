@@ -1,0 +1,1005 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly PROGRAM="${0##*/}"
+readonly STATE_DIR="/etc/sub-manager"
+readonly STATE_FILE="$STATE_DIR/clients.json"
+readonly LOCK_FILE="$STATE_DIR/manager.lock"
+readonly NGINX_FILE="/etc/nginx/conf.d/private-sub.conf"
+readonly HOST="sub.example.com"
+readonly PORT="8443"
+readonly CERT_FILE="/root/cert/sub.example.com/fullchain.pem"
+readonly KEY_FILE="/root/cert/sub.example.com/privkey.pem"
+readonly CONVERTER="http://127.0.0.1:25500/sub"
+# 转换参数（url 之外的部分），validate 与 render_nginx 共用，避免两处漂移。
+# rename 是 URL 编码的 \|📊.*@ ，用于剥掉 3x-ui 追加在节点名末尾的
+# "|📊<剩余流量>"。该后缀每次更新都变，会让 Mihomo 的 store-selected 匹配不到
+# 上次选中的节点，从而回落到策略组第一项。剩余流量仍由 Subscription-UserInfo
+# 响应头透传，客户端订阅卡片照常显示。
+readonly CONVERT_OPTS="emoji=true&list=false&udp=true&expand=false&rename=%5C%7C%F0%9F%93%8A.%2A%40"
+# 客户端订阅卡片上显示的名称。两个分支各自取名，必须人工对齐：
+#   - Clash 分支靠这里生成的 Content-Disposition；
+#   - raw 分支原样透传 3x-ui 的 Profile-Title，其值来自面板
+#     「设置 → 订阅 → 通用 → 订阅标题」（后端 setting key: subTitle）。
+# 改这里必须同步改面板，否则同一条订阅链接在 Clash 与 Shadowrocket 上显示两个名字。
+# filename 与 filename*=UTF-8'' 双写：新解析器优先取后者，老解析器只认前者。
+# 保持纯 ASCII，否则 filename= 那一份会失真。
+readonly PROFILE_NAME="DuskWander"
+readonly SOURCE_PATTERN='^https://[^[:space:]]+$'
+readonly NODE_PATTERN='type: (ss|ssr|vmess|vless|trojan|hysteria|hysteria2|tuic|wireguard|socks5|http)'
+# 订阅入口的 UA 白名单：命中则返回 Clash 配置，否则原样透传 3x-ui 原生订阅。
+# 只用来回答「是不是 Clash 家族」，不区分具体客户端。新客户端不在表内时，
+# 客户端侧加 ?t=clash 即可，不必改服务器。
+readonly UA_CLASH_PATTERN='(clash|mihomo|meta|stash|verge|flclash|nekobox)'
+# 3x-ui 只读联动。用于 list 显示每条订阅属于哪个客户端、报告双向漂移，以及
+# add --from-xui 推导原始订阅地址。全部是只读查询：sqlite3 -readonly 加 URI
+# mode=ro 双保险。本脚本对 x-ui / xray / *.db 保持零写操作。
+readonly XUI_DB="/etc/x-ui/x-ui.db"
+readonly XUI_SUB_PORT_DEFAULT="2096"
+readonly XUI_SUB_PATH_DEFAULT="/sub/"
+
+WORK_DIR=""
+
+cleanup() {
+    [[ -n "$WORK_DIR" ]] && rm -rf -- "$WORK_DIR"
+}
+trap cleanup EXIT
+
+fail() {
+    printf '错误：%s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+用法：
+  sub-manager add [--from-xui]
+  sub-manager update <订阅编号>
+  sub-manager rotate <订阅编号>|--all
+  sub-manager remove <订阅编号>
+  sub-manager renumber <起始编号>
+  sub-manager list
+  sub-manager test [订阅编号]
+  sub-manager resync
+  sub-manager help
+
+说明：
+  add       隐藏输入 3x-ui 原始订阅并自动分配订阅编号和订阅地址
+            --from-xui 改为从 3x-ui 直接挑一个还没有聚合地址的客户端，
+            原始订阅地址由 subId 推导，不必手工粘贴
+  update    按订阅编号更新原始订阅，订阅地址保持不变
+  rotate    按订阅编号换一条新的随机路径，编号与原始订阅保持不变；--all 换全部
+  remove    按订阅编号撤销该订阅
+  renumber  把现有订阅按当前顺序重排为从指定编号开始，订阅地址不变；
+            编号平时只增不复用，删除留下的空号不会影响后续新增
+  list      显示订阅编号、所属客户端、脱敏原始订阅和订阅地址，并报告与
+            3x-ui 之间的双向漂移（x-ui 有客户端却无地址 / 地址已无对应客户端）
+  test      测试一个或全部订阅的源地址、转换和订阅入口
+  resync    改动转换参数或模板后，按现有状态重建 Nginx 配置（不需输入订阅）
+
+与 3x-ui 的关系：
+  list 与 add --from-xui 会只读查询 /etc/x-ui/x-ui.db。本脚本对 x-ui、
+  xray 与任何 *.db 零写操作；面板增删客户端不会自动改动聚合地址，需要
+  跑上面的命令。撤销聚合地址也不等于收回节点访问——真正踢人要在面板
+  删掉或更换该客户端的 UUID。
+
+订阅地址：
+  https://<域名>:<端口>/<48 位随机 hex>
+
+  一条链接同时服务 Clash 与原生客户端，按 User-Agent 分流，
+  ?t=clash / ?t=raw 强制指定格式。
+
+  配设备时在地址末尾加 #<名称>，例如 #DuskWander。fragment 由客户端本地
+  截断、不发给服务器，Shadowrocket 只认它来命名订阅。
+EOF
+}
+
+require_root() {
+    [[ $EUID -eq 0 ]] || fail "必须以 root 运行。"
+}
+
+require_commands() {
+    local command
+    for command in curl jq openssl flock nginx systemctl mktemp install date grep; do
+        command -v "$command" >/dev/null 2>&1 || fail "缺少命令：$command"
+    done
+}
+
+prepare_state() {
+    install -d -m 0700 -o root -g root "$STATE_DIR"
+    if [[ ! -e "$STATE_FILE" ]]; then
+        printf '{"version":2,"clients":{}}\n' >"$STATE_FILE"
+    fi
+    [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || fail "状态文件类型不安全。"
+    chmod 0600 "$STATE_FILE"
+    jq -e '.version == 2 and (.clients | type == "object")' "$STATE_FILE" >/dev/null \
+        || jq -e '.version == 1 and (.clients | type == "object")' "$STATE_FILE" >/dev/null \
+        || fail "状态文件格式无效。"
+
+    exec 9>"$LOCK_FILE"
+    chmod 0600 "$LOCK_FILE"
+    flock -n 9 || fail "另一个管理操作正在运行。"
+
+    WORK_DIR=$(mktemp -d "$STATE_DIR/work.XXXXXX")
+    chmod 0700 "$WORK_DIR"
+}
+
+validate_name() {
+    [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] \
+        || fail "订阅编号格式无效。"
+}
+
+client_exists() {
+    jq -e --arg name "$1" '.clients[$name] != null' "$STATE_FILE" >/dev/null
+}
+
+# 下一个订阅编号。编号只增不复用：优先读状态里的 next_id；旧状态没有该字段时，
+# 按现有最大编号 + 1 初始化。删除不会回退它，所以删掉当前最大号后，下一次新增
+# 也不会重新拿到同一个编号。
+next_sub_id() {
+    local state=$1 id
+    id=$(jq -r '.next_id // empty' "$state")
+    if [[ -z "$id" ]]; then
+        id=$(jq -r '[.clients | keys[] | select(test("^sub-[0-9]+$"))
+                     | capture("^sub-(?<n>[0-9]+)$").n | tonumber]
+                    | (max // 0) + 1' "$state")
+    fi
+    [[ "$id" =~ ^[1-9][0-9]*$ ]] || fail "状态中的 next_id 无效。"
+    printf '%s' "$id"
+}
+
+sub_url() {
+    printf 'https://%s:%s/%s' "$HOST" "$PORT" "$1"
+}
+
+# 打印订阅地址时一并带上 fragment。Shadowrocket 的订阅名是本地备注字段，只认
+# URL fragment 给初值，服务器发的 Profile-Title 它拿到了也不用（incidents 2026-08-22）。
+# fragment 由客户端本地截断，不会发到服务器。
+print_sub_url() {
+    printf '订阅地址（Clash 与原生客户端通用，直接整条粘进客户端）：\n'
+    sub_url "$1"
+    printf '#%s\n' "$PROFILE_NAME"
+}
+
+# 每条订阅只有一条随机路径，全局唯一即可。
+path_in_use() {
+    local state=$1 candidate=$2
+    jq -e --arg path "$candidate" \
+        '[.clients[]?.path] | index($path) != null' "$state" >/dev/null
+}
+
+new_random_path() {
+    local state=$1 candidate
+    while :; do
+        candidate=$(openssl rand -hex 24)
+        path_in_use "$state" "$candidate" || break
+    done
+    printf '%s' "$candidate"
+}
+
+# 状态文件 v1 → v2：v1 每条订阅有两条路径（path = Clash 专用地址，
+# unified_path = 聚合地址），v2 只保留一条 path。
+#
+# 迁移不搬运旧值，而是直接生成全新随机路径——退役 /clash/ 那次改动本来就要求
+# 轮换全部路径，合并成一步做就没有「把 unified_path 搬进 path」搬错位的风险。
+# 代价是升级即失效所有旧地址，这是当时明确要的效果。
+migrate_state() {
+    local state=$1 output=$2
+    local names=() name new_path
+
+    cp -- "$state" "$output"
+    [[ $(jq -r '.version' "$output") == "1" ]] || return 0
+
+    mapfile -t names < <(jq -r '.clients | keys[]' "$output")
+    for name in "${names[@]}"; do
+        [[ -n "$name" ]] || continue
+        new_path=$(new_random_path "$output")
+        jq --arg name "$name" --arg path "$new_path" \
+            '.clients[$name].path = $path | del(.clients[$name].unified_path)' \
+            "$output" >"$output.next"
+        mv -- "$output.next" "$output"
+    done
+    jq '.version = 2' "$output" >"$output.next"
+    mv -- "$output.next" "$output"
+}
+
+# ---- 3x-ui 只读联动 -------------------------------------------------------
+# 以下全部是只读查询。面板增删客户端不会自动改动聚合地址：这里只负责让
+# list 看得见漂移、让 add --from-xui 省掉手工粘贴，触发权仍在人手上。
+
+# x-ui 停了、没装 sqlite3、或 DB 读不到时返回非零。list 据此静默降级，
+# add --from-xui 据此报错。
+xui_available() {
+    command -v sqlite3 >/dev/null 2>&1 || return 1
+    [[ -r "$XUI_DB" ]] || return 1
+    systemctl is-active --quiet x-ui.service || return 1
+    return 0
+}
+
+xui_query() {
+    # .timeout 给 3 秒重试窗口。x-ui.db 是 journal_mode=delete，写事务会完全
+    # 阻塞读；而 x-ui 每十几秒就要写一次流量统计。实测不带 timeout 时约 1.2%
+    # 的只读查询直接返回 "database is locked"。stderr 不在这里吞掉，由调用方
+    # 决定是降级还是报错。
+    sqlite3 -readonly -noheader -separator $'\t' -cmd '.timeout 3000' \
+        "file:${XUI_DB}?mode=ro" "$1"
+}
+
+# 把「subId <TAB> 显示名 <TAB> enable」写进 $1，成功返回 0。
+# 显示名取面板的备注（comment），为空时回落到 email——3x-ui 的 email 只是标签，
+# 不参与任何认证，不是凭据。备注里的 TAB 和换行会破坏 TSV，查询里先替换掉。
+# 一个客户端可以挂在多个入站上，group by 去重。
+#
+# 查询失败**和一行都读不到**都返回非零。「x-ui 里一个客户端都没有」不是正常
+# 状态，把它当成空列表会让一次坏读表现为「无漂移」「无需新增」——恰好是那个
+# 看着安心的错误方向。
+xui_clients_into() {
+    local out=$1
+    xui_query "select c.sub_id,
+                      replace(replace(coalesce(nullif(c.comment, ''), c.email), char(9), ' '), char(10), ' '),
+                      c.enable
+                 from clients c
+                 join client_inbounds ci on ci.client_id = c.id
+                where c.sub_id is not null and c.sub_id <> ''
+                group by c.id
+                order by c.id;" >"$out" 2>"$out.err" || return 1
+    [[ -s "$out" ]] || return 1
+    return 0
+}
+
+# 原始订阅地址前缀。subPort / subPath 只有被面板改过才会落进 settings 表，
+# 查不到即为 3x-ui 默认值——但这必须与「查询失败」区分开，所以两次查询都检查
+# 退出码。若面板另设了 subDomain，推导出的地址会指向别的域名，那种情况下
+# validate_source_and_conversion 会取不到订阅而直接失败，不会静默写进状态文件。
+xui_sub_base() {
+    local port path
+    port=$(xui_query "select value from settings where key='subPort';" 2>/dev/null) || return 1
+    path=$(xui_query "select value from settings where key='subPath';" 2>/dev/null) || return 1
+    [[ -n "$port" ]] || port=$XUI_SUB_PORT_DEFAULT
+    [[ -n "$path" ]] || path=$XUI_SUB_PATH_DEFAULT
+    [[ "$path" == /* ]] || path="/$path"
+    [[ "$path" == */ ]] || path="$path/"
+    printf 'https://%s:%s%s' "$HOST" "$port" "$path"
+}
+
+# 从 source_url 尾部取出 3x-ui 的 subId。它是订阅条目与面板客户端之间唯一的
+# 对应键——状态文件里不缓存客户端 id，避免多存一份会过期的值。
+source_sub_id() {
+    local url=${1%%\?*}
+    url=${url%/}
+    printf '%s' "${url##*/}"
+}
+
+# 拉取原始订阅时的 curl --resolve 参数。源订阅的域名如果就是本机域名，一律
+# 强制解析到 127.0.0.1：既省掉一次公网回环，也让 3x-ui 订阅只监听
+# 127.0.0.1（unified-subscription §6）时 add / test 不会跟着坏。
+# --resolve 只改 IP，SNI 与 Host 头不变，证书照常校验。
+# 这与 render_nginx 里原生分支的回源改写是同一条规则。
+source_resolve_args() {
+    local url=$1 rest authority host_only port_only
+    rest=${url#https://}
+    authority=${rest%%/*}
+    host_only=${authority%%:*}
+    port_only=${authority#*:}
+    [[ "$port_only" != "$authority" ]] || port_only=443
+    [[ "$host_only" == "$HOST" ]] || return 0
+    printf -- '--resolve\n%s:%s:127.0.0.1\n' "$host_only" "$port_only"
+}
+
+read_source_url() {
+    local value
+    [[ -t 0 ]] || fail "隐藏输入需要交互式终端。"
+    printf '粘贴 3x-ui 原始订阅地址（输入不会显示）：' >&2
+    IFS= read -r -s value
+    printf '\n' >&2
+    [[ "$value" =~ $SOURCE_PATTERN ]] || fail "只接受不含空格的 HTTPS 订阅地址。"
+    [[ ${#value} -le 4096 ]] || fail "订阅地址过长。"
+    printf '%s' "$value"
+}
+
+validate_source_and_conversion() {
+    local source_url=$1
+    local prefix=${2:-validate}
+    local source_body="$WORK_DIR/${prefix}.source"
+    local clash_body="$WORK_DIR/${prefix}.clash"
+    local encoded
+    local resolve=()
+    mapfile -t resolve < <(source_resolve_args "$source_url")
+
+    curl --fail --silent --show-error --location --max-time 30 \
+        "${resolve[@]}" \
+        --output "$source_body" "$source_url" >/dev/null \
+        || fail "无法获取 3x-ui 原始订阅。"
+    [[ -s "$source_body" ]] || fail "3x-ui 原始订阅为空。"
+
+    encoded=$(jq -rn --arg value "$source_url" '$value|@uri')
+    curl --fail --silent --show-error --max-time 90 \
+        --output "$clash_body" \
+        "${CONVERTER}?target=clash&url=${encoded}&${CONVERT_OPTS}" >/dev/null \
+        || fail "本地转换失败。"
+
+    [[ -s "$clash_body" ]] || fail "转换结果为空。"
+    grep -q '^proxies:' "$clash_body" || fail "转换结果缺少 proxies。"
+    grep -Eq "$NODE_PATTERN" "$clash_body" || fail "转换结果未检测到支持的代理节点。"
+    if grep -Fq -- "$source_url" "$clash_body"; then
+        fail "转换结果意外包含原始订阅地址。"
+    fi
+    # 验证单组设计
+    grep -q '  - name: 🚀节点选择' "$clash_body" || fail "转换结果缺少策略组 '节点选择'。"
+    local group_count
+    group_count=$(grep -c '  - name: ' "$clash_body" || true)
+    [[ "$group_count" -eq 1 ]] || fail "转换结果策略组数量应为 1，实际 $group_count。"
+    # 验证 RULE-SET 模式
+    grep -q 'rule-providers:' "$clash_body" || fail "转换结果缺少 rule-providers。"
+    grep -q 'RULE-SET,' "$clash_body" || fail "转换结果缺少 RULE-SET 引用。"
+    # 验证 DNS 防泄漏
+    grep -q 'enhanced-mode: fake-ip' "$clash_body" || fail "转换结果缺少 fake-ip DNS 模式。"
+    grep -q 'respect-rules: true' "$clash_body" || fail "转换结果缺少 respect-rules。"
+    grep -q '^ipv6: false' "$clash_body" || fail "转换结果未关闭 IPv6。"
+    grep -q 'strict-route: true' "$clash_body" || fail "转换结果缺少 strict-route。"
+    grep -q 'dns-hijack:' "$clash_body" || fail "转换结果缺少 DNS 劫持配置。"
+    # 验证选择持久化：缺了它客户端每次 reload 都会重置为策略组第一项
+    grep -q 'store-selected: true' "$clash_body" || fail "转换结果缺少 profile.store-selected。"
+    # 节点名不得残留 3x-ui 的流量后缀，否则名字随流量变化，store-selected 失效
+    if grep -Fq '|📊' "$clash_body"; then
+        fail "转换结果的节点名仍包含流量后缀，rename 参数未生效。"
+    fi
+}
+
+render_nginx() {
+    local state=$1 destination=$2
+    local name path source_url encoded
+    local rest authority uri host_only port_only raw_upstream
+
+    cat >"$destination" <<EOF
+# Generated by $PROGRAM. Do not edit manually.
+
+# 订阅入口（/<48 位随机 hex>，不带任何前缀）的分流判定。Clash 家族 UA 走转换
+# 后端，其余一切原样透传 3x-ui 原生订阅——识别失败时拿到的正是本改造之前
+# Shadowrocket / V2rayN 本来就会拿到的内容，失败方向是安全的。?t=clash / ?t=raw
+# 强制覆盖 UA 判定，用于 UA 不含关键词的冷门客户端，不必为此改服务器。
+map \$http_user_agent \$ua_clash {
+    default 0;
+    "~*$UA_CLASH_PATTERN" 1;
+}
+
+map "\$arg_t:\$ua_clash" \$sub_backend {
+    default   "raw";
+    "clash:0" "clash";
+    "clash:1" "clash";
+    ":1"      "clash";
+    "raw:1"   "raw";
+}
+
+server {
+    listen $PORT ssl;
+    listen [::]:$PORT ssl;
+    server_name $HOST;
+
+    ssl_certificate $CERT_FILE;
+    ssl_certificate_key $KEY_FILE;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SUBSCRIPTION_TLS:1m;
+    ssl_session_timeout 10m;
+
+    server_tokens off;
+    access_log off;
+
+    # 自托管规则文件（反代 raw.githubusercontent），手工维护于该 snippet。
+    include /etc/nginx/snippets/sub-rules.conf;
+EOF
+
+    while IFS=$'\t' read -r name path source_url; do
+        [[ -n "$name" ]] || continue
+        [[ "$path" =~ ^[0-9a-f]{48}$ ]] || fail "状态中的随机路径无效。"
+        [[ "$source_url" =~ $SOURCE_PATTERN ]] || fail "状态中的订阅地址无效。"
+        encoded=$(jq -rn --arg value "$source_url" '$value|@uri')
+
+        # 原生订阅的回源地址。本机自己的域名一律改走 127.0.0.1（附带 SNI 与 Host），
+        # 既省掉一次公网回环，也让 3x-ui 订阅只监听 127.0.0.1 时无需改这里。
+        rest=${source_url#https://}
+        if [[ "$rest" == */* ]]; then
+            authority=${rest%%/*}
+            uri=/${rest#*/}
+        else
+            authority=$rest
+            uri=/
+        fi
+        host_only=${authority%%:*}
+        port_only=${authority#*:}
+        [[ "$port_only" != "$authority" ]] || port_only=443
+        if [[ "$host_only" == "$HOST" ]]; then
+            raw_upstream="https://127.0.0.1:${port_only}${uri}"
+        else
+            raw_upstream="https://${authority}${uri}"
+        fi
+
+        cat >>"$destination" <<EOF
+
+    # 订阅入口：一条链接同时服务 Clash 与原生客户端。路径不带任何前缀，
+    # 只有 48 位随机 hex，避免从 URL 结构看出这是什么服务。
+    # 两个承接 location 必须是精确匹配 + internal，不能用命名 location——
+    # 命名 location 里的 proxy_pass 不允许带 URI 部分。它们不对外可见，
+    # 因此保留可读的 /internal/ 前缀。
+    location = /$path {
+        limit_except GET { deny all; }
+
+        error_page 418 = /internal/clash/$path;
+        error_page 419 = /internal/raw/$path;
+        if (\$sub_backend = "clash") { return 418; }
+        return 419;
+    }
+
+    location = /internal/clash/$path {
+        internal;
+
+        proxy_pass $CONVERTER?target=clash&url=$encoded&$CONVERT_OPTS;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1;
+        proxy_set_header Connection "";
+        proxy_set_header Accept-Encoding "";
+        proxy_hide_header Content-Disposition;
+        proxy_hide_header Server;
+        proxy_hide_header X-Powered-By;
+        proxy_read_timeout 90s;
+        proxy_connect_timeout 5s;
+        proxy_buffering on;
+
+        sub_filter_types *;
+        sub_filter_once off;
+        sub_filter "behavior: classical
+    url:" "behavior: classical
+    format: text
+    url:";
+
+        # 同一 URL 按 UA 返回两种格式，缺了 Vary 会被客户端或中间缓存串味。
+        add_header Vary "User-Agent" always;
+        add_header Cache-Control "no-store" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header Content-Disposition "attachment; filename=\"$PROFILE_NAME\"; filename*=UTF-8''$PROFILE_NAME" always;
+    }
+
+    location = /internal/raw/$path {
+        internal;
+
+        # 原样透传：不加 Content-Disposition，不动上游的 Profile-* 与
+        # Subscription-Userinfo，Reality 的 spx 等参数原封不动带回客户端
+        # （spx 由 3x-ui 每次请求随机生成，本身就不固定）。
+        proxy_pass $raw_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host_only;
+        proxy_set_header Connection "";
+        proxy_ssl_server_name on;
+        proxy_ssl_name $host_only;
+        proxy_hide_header Server;
+        proxy_hide_header X-Powered-By;
+        proxy_read_timeout 30s;
+        proxy_connect_timeout 5s;
+        proxy_buffering on;
+
+        add_header Vary "User-Agent" always;
+        add_header Cache-Control "no-store" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "no-referrer" always;
+    }
+EOF
+    done < <(jq -r '.clients | to_entries | sort_by(.key)[] | [.key,.value.path,.value.source_url] | @tsv' "$state")
+
+    cat >>"$destination" <<'EOF'
+
+    location / {
+        return 404;
+    }
+}
+EOF
+    chmod 0600 "$destination"
+}
+
+validate_candidate_nginx() {
+    local candidate=$1
+    local test_dir="$WORK_DIR/nginx-test"
+    mkdir -m 0700 "$test_dir"
+    cat >"$test_dir/nginx.conf" <<EOF
+pid $test_dir/nginx.pid;
+error_log $test_dir/error.log;
+events { worker_connections 16; }
+http {
+    include /etc/nginx/mime.types;
+    # 候选配置里的规则 snippet 引用了名为 sub_rules 的缓存区，这里用临时目录
+    # 声明同名区仅供语法校验。切勿改成 include 生产的 sub-rules-cache.conf：
+    # nginx -t 会按本配置的运行用户（默认 nobody）去创建并 chown 缓存目录，
+    # 从而夺走 www-data 的写权限，导致规则端点返回 500。
+    proxy_cache_path $test_dir/cache levels=1:2 keys_zone=sub_rules:1m max_size=1m;
+    include $candidate;
+}
+EOF
+    nginx -t -q -c "$test_dir/nginx.conf" -p / >/dev/null 2>&1 \
+        || fail "生成的 Nginx 配置校验失败。"
+}
+
+apply_state() {
+    local candidate_state=$1
+    local resolved_state="$WORK_DIR/candidate.resolved.json"
+    local candidate_nginx="$WORK_DIR/private-sub.conf"
+    local state_backup="$WORK_DIR/clients.backup.json"
+    local nginx_backup="$WORK_DIR/nginx.backup.conf"
+    local had_nginx=0
+
+    migrate_state "$candidate_state" "$resolved_state"
+    render_nginx "$resolved_state" "$candidate_nginx"
+    validate_candidate_nginx "$candidate_nginx"
+    cp -- "$STATE_FILE" "$state_backup"
+    if [[ -f "$NGINX_FILE" ]]; then
+        cp -- "$NGINX_FILE" "$nginx_backup"
+        had_nginx=1
+    fi
+
+    install -m 0600 -o root -g root "$resolved_state" "$STATE_FILE"
+    install -m 0600 -o root -g root "$candidate_nginx" "$NGINX_FILE"
+
+    if ! nginx -t >/dev/null 2>&1 || ! systemctl reload nginx; then
+        install -m 0600 -o root -g root "$state_backup" "$STATE_FILE"
+        if [[ $had_nginx -eq 1 ]]; then
+            install -m 0600 -o root -g root "$nginx_backup" "$NGINX_FILE"
+        else
+            rm -f -- "$NGINX_FILE"
+        fi
+        nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
+        fail "应用失败，已恢复原配置。"
+    fi
+}
+
+cmd_add() {
+    local name source_url path now seq candidate="$WORK_DIR/candidate.json"
+    seq=$(next_sub_id "$STATE_FILE")
+    name="sub-$seq"
+
+    source_url=$(read_source_url)
+    printf '正在验证原始订阅和 Clash 转换...\n'
+    validate_source_and_conversion "$source_url"
+
+    path=$(new_random_path "$STATE_FILE")
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    jq --arg name "$name" --arg source "$source_url" --arg path "$path" --arg now "$now" \
+        --argjson next "$((seq + 1))" \
+        '.clients[$name] = {path:$path,source_url:$source,created_at:$now,updated_at:$now}
+         | .next_id = $next' \
+        "$STATE_FILE" >"$candidate"
+    apply_state "$candidate"
+    path=$(jq -r --arg name "$name" '.clients[$name].path' "$STATE_FILE")
+
+    printf '已添加订阅：%s\n' "$name"
+    print_sub_url "$path"
+}
+
+# 从 3x-ui 直接挑一个还没有聚合地址的客户端建订阅。原始订阅地址由 subId
+# 推导——手工粘贴那一步本来就只是把面板上的同一个值搬过来，推导既省事又
+# 不会把凭据带进 shell 历史。除了地址来源，其余流程与 add 完全相同：同样
+# 走 validate_source_and_conversion 全套校验，同样由 apply_state 事务落地。
+cmd_add_from_xui() {
+    local sub_id label enable base entry_url
+    local -A mapped=()
+    local cand_sub=() cand_label=()
+    local name source_url path now choice index i seq
+    local candidate="$WORK_DIR/candidate.json"
+
+    xui_available \
+        || fail "读不到 3x-ui：确认 x-ui 正在运行、已安装 sqlite3，且 $XUI_DB 可读。"
+    # 这里不允许降级。读失败时若当成空列表，就会打印「全部客户端都已有聚合
+    # 地址」——一次坏读伪装成一切正常，正是最该避免的方向。
+    xui_clients_into "$WORK_DIR/xui.tsv" \
+        || fail "读取 3x-ui 客户端列表失败（$(tr -d '\n' <"$WORK_DIR/xui.tsv.err" 2>/dev/null || true)），未做修改。"
+
+    while IFS= read -r entry_url; do
+        [[ -n "$entry_url" ]] || continue
+        mapped["$(source_sub_id "$entry_url")"]=1
+    done < <(jq -r '.clients[]?.source_url' "$STATE_FILE")
+
+    while IFS=$'\t' read -r sub_id label enable; do
+        [[ -n "$sub_id" ]] || continue
+        [[ "$enable" == "1" ]] || continue
+        [[ -z "${mapped[$sub_id]:-}" ]] || continue
+        cand_sub+=("$sub_id")
+        cand_label+=("$label")
+    done <"$WORK_DIR/xui.tsv"
+
+    if [[ ${#cand_sub[@]} -eq 0 ]]; then
+        printf '全部启用中的 x-ui 客户端都已有聚合地址，无需新增。\n'
+        return
+    fi
+
+    printf '还没有聚合地址的 x-ui 客户端：\n\n'
+    for i in "${!cand_sub[@]}"; do
+        printf '  %2d) %s\n' "$((i + 1))" "${cand_label[$i]}"
+    done
+    printf '\n选择编号（直接回车取消）：' >&2
+    IFS= read -r choice
+    [[ -n "$choice" ]] || fail "已取消，未做修改。"
+    [[ "$choice" =~ ^[0-9]+$ ]] || fail "编号必须是数字。"
+    [[ "$choice" -ge 1 && "$choice" -le ${#cand_sub[@]} ]] || fail "编号超出范围。"
+    index=$((choice - 1))
+
+    base=$(xui_sub_base) || fail "读取 3x-ui 订阅设置失败，未做修改。"
+    source_url="${base}${cand_sub[$index]}"
+    [[ "$source_url" =~ $SOURCE_PATTERN ]] || fail "由 3x-ui 推导出的原始订阅地址无效。"
+
+    seq=$(next_sub_id "$STATE_FILE")
+    name="sub-$seq"
+
+    printf '\n为「%s」建立订阅 %s\n' "${cand_label[$index]}" "$name"
+    printf '正在验证原始订阅和 Clash 转换...\n'
+    validate_source_and_conversion "$source_url"
+
+    path=$(new_random_path "$STATE_FILE")
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    jq --arg name "$name" --arg source "$source_url" --arg path "$path" --arg now "$now" \
+        --argjson next "$((seq + 1))" \
+        '.clients[$name] = {path:$path,source_url:$source,created_at:$now,updated_at:$now}
+         | .next_id = $next' \
+        "$STATE_FILE" >"$candidate"
+    apply_state "$candidate"
+    path=$(jq -r --arg name "$name" '.clients[$name].path' "$STATE_FILE")
+
+    printf '已添加订阅：%s（%s）\n' "$name" "${cand_label[$index]}"
+    print_sub_url "$path"
+}
+
+cmd_update() {
+    local name=${1:-} source_url now path candidate="$WORK_DIR/candidate.json"
+    [[ -n "$name" ]] || fail "update 需要订阅编号，例如 sub-1。"
+    validate_name "$name"
+    client_exists "$name" || fail "订阅编号不存在。"
+
+    source_url=$(read_source_url)
+    printf '正在验证新的原始订阅和 Clash 转换...\n'
+    validate_source_and_conversion "$source_url"
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    jq --arg name "$name" --arg source "$source_url" --arg now "$now" \
+        '.clients[$name].source_url=$source | .clients[$name].updated_at=$now' \
+        "$STATE_FILE" >"$candidate"
+    apply_state "$candidate"
+    path=$(jq -r --arg name "$name" '.clients[$name].path' "$STATE_FILE")
+
+    printf '已更新订阅，订阅地址保持不变：%s\n' "$name"
+    print_sub_url "$path"
+}
+
+cmd_remove() {
+    local name=${1:-} path answer candidate="$WORK_DIR/candidate.json"
+    [[ -n "$name" ]] || fail "remove 需要订阅编号，例如 sub-1。"
+    validate_name "$name"
+    client_exists "$name" || fail "订阅编号不存在。"
+    path=$(jq -r --arg name "$name" '.clients[$name].path' "$STATE_FILE")
+
+    printf '将撤销订阅：%s\n' "$name"
+    sub_url "$path"
+    printf '\n'
+    printf '确认删除？[y/n] ' >&2
+    IFS= read -r answer
+    answer=${answer,,}
+    [[ "$answer" == "y" ]] || { printf '已取消，未做修改。\n' >&2; exit 1; }
+
+    jq --arg name "$name" 'del(.clients[$name])' "$STATE_FILE" >"$candidate"
+    apply_state "$candidate"
+    printf '已撤销订阅：%s\n' "$name"
+}
+
+# 把现有订阅按编号顺序重排为从指定值开始。只改 clients 的键：path、source_url
+# 与节点都不动，地址不会变化。下一次 add 从重排后的末尾继续，不回退。
+cmd_renumber() {
+    local start=${1:-} answer count old new candidate="$WORK_DIR/candidate.json"
+    [[ "$start" =~ ^[1-9][0-9]*$ ]] || fail "renumber 需要一个正整数起始编号，例如 101。"
+    count=$(jq '[.clients | keys[] | select(test("^sub-[0-9]+$"))] | length' "$STATE_FILE")
+    [[ "$count" -gt 0 ]] || fail "尚未配置订阅。"
+
+    printf '将把 %d 条订阅重排为 sub-%s…sub-%s：\n' \
+        "$count" "$start" "$((start + count - 1))"
+    while IFS=$'\t' read -r old new; do
+        printf '  %-9s → sub-%s\n' "$old" "$new"
+    done < <(jq -r --argjson start "$start" '
+        [.clients | keys[] | select(test("^sub-[0-9]+$"))
+         | capture("^sub-(?<n>[0-9]+)$").n | tonumber]
+        | sort
+        | to_entries[]
+        | ["sub-\(.value)", ($start + .key)]
+        | @tsv' "$STATE_FILE")
+    printf '订阅地址、原始订阅与节点均不受影响。\n'
+    printf '确认重排？[y/n] ' >&2
+    IFS= read -r answer
+    answer=${answer,,}
+    [[ "$answer" == "y" ]] || { printf '已取消，未做修改。\n' >&2; exit 1; }
+
+    jq --argjson start "$start" '
+        .clients as $c
+        | ($c | keys | map(select(test("^sub-[0-9]+$")))
+                | sort_by(capture("^sub-(?<n>[0-9]+)$").n | tonumber)) as $old
+        | .clients = (reduce range(0; $old | length) as $i
+              ({}; .["sub-\($start + $i)"] = $c[$old[$i]])
+              + ($c | with_entries(select(.key | test("^sub-[0-9]+$") | not))))
+        | .next_id = ($start + ($old | length))
+    ' "$STATE_FILE" >"$candidate"
+    apply_state "$candidate"
+
+    printf '已重排 %d 条订阅，下一个编号为 sub-%s。\n' "$count" "$((start + count))"
+}
+
+cmd_list() {
+    local source_url host path_tail masked name path sub_id label enable
+    local -A xui_label=() xui_enable=() mapped=()
+    local xui_order=() missing=() orphan=()
+    local have_xui=0 i
+
+    if [[ $(jq '.clients | length' "$STATE_FILE") -eq 0 ]]; then
+        printf '尚未配置订阅。\n'
+        return
+    fi
+
+    # x-ui 读不到就静默降级为不带客户端名的旧输出。list 是只读查看命令，
+    # 不该因为面板停了而失败；但也绝不把一次坏读说成「无漂移」——
+    # xui_clients_into 读失败或读到空都会返回非零，此处一并落到降级分支。
+    if xui_available && xui_clients_into "$WORK_DIR/xui.tsv"; then
+        while IFS=$'\t' read -r sub_id label enable; do
+            [[ -n "$sub_id" ]] || continue
+            xui_label["$sub_id"]=$label
+            xui_enable["$sub_id"]=$enable
+            xui_order+=("$sub_id")
+        done <"$WORK_DIR/xui.tsv"
+        [[ ${#xui_order[@]} -gt 0 ]] && have_xui=1
+    fi
+
+    while IFS=$'\t' read -r name path source_url; do
+        host=$(printf '%s' "$source_url" | sed -E 's#^https://([^/]+).*#\1#')
+        path_tail=$(printf '%s' "$source_url" | sed -E 's#^.*/([^/?]+)(\?.*)?$#\1#')
+        if [[ ${#path_tail} -gt 8 ]]; then
+            masked="$host / …${path_tail: -8}"
+        else
+            masked="$host / $path_tail"
+        fi
+        sub_id=$(source_sub_id "$source_url")
+        mapped["$sub_id"]=$name
+        # 订阅编号只印在该条目的第一行上。x-ui 可读时第一行是客户端名，
+        # 降级时第一行是脱敏原始订阅。
+        if [[ $have_xui -eq 1 ]]; then
+            if [[ -n "${xui_label[$sub_id]:-}" ]]; then
+                if [[ "${xui_enable[$sub_id]}" == "1" ]]; then
+                    printf '%-10s 客户端           %s\n' "$name" "${xui_label[$sub_id]}"
+                else
+                    printf '%-10s 客户端           %s（面板中已禁用）\n' "$name" "${xui_label[$sub_id]}"
+                fi
+            else
+                printf '%-10s 客户端           ⚠ x-ui 中已无对应客户端\n' "$name"
+                orphan+=("$name")
+            fi
+            printf '%-10s 原始订阅（脱敏） %s\n' "" "$masked"
+        else
+            printf '%-10s 原始订阅（脱敏） %s\n' "$name" "$masked"
+        fi
+        printf '%-10s 订阅地址         ' ""
+        sub_url "$path"
+        printf '#%s\n\n' "$PROFILE_NAME"
+    done < <(jq -r '.clients | to_entries | sort_by(.key)[] | [.key,.value.path,.value.source_url] | @tsv' "$STATE_FILE")
+    printf '一条地址对 Clash 与原生客户端通用；UA 判定失败时可加 ?t=clash 或 ?t=raw 强制指定。\n'
+    printf '末尾的 #%s 是给 Shadowrocket 命名用的，整条粘贴即可。\n' "$PROFILE_NAME"
+
+    [[ $have_xui -eq 1 ]] || {
+        printf '\n（x-ui 未运行或读不到 %s，本次未核对客户端。）\n' "$XUI_DB"
+        return
+    }
+
+    # 只把启用中的客户端算作「缺地址」。禁用的客户端订阅内容为空，
+    # 建了也过不了 add 的校验。
+    for sub_id in "${xui_order[@]}"; do
+        [[ -z "${mapped[$sub_id]:-}" ]] || continue
+        [[ "${xui_enable[$sub_id]}" == "1" ]] || continue
+        missing+=("${xui_label[$sub_id]}")
+    done
+
+    if [[ ${#missing[@]} -eq 0 && ${#orphan[@]} -eq 0 ]]; then
+        printf '\nx-ui 客户端与聚合地址一一对应，无漂移。\n'
+        return
+    fi
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        printf '\n⚠ %d 个 x-ui 客户端还没有聚合地址：' "${#missing[@]}"
+        for i in "${!missing[@]}"; do
+            [[ $i -eq 0 ]] || printf '、'
+            printf '%s' "${missing[$i]}"
+        done
+        printf '\n  用 %s add --from-xui 逐个补齐。\n' "$PROGRAM"
+    fi
+    if [[ ${#orphan[@]} -gt 0 ]]; then
+        printf '\n⚠ %d 条聚合地址在 x-ui 中已无对应客户端：%s\n' "${#orphan[@]}" "${orphan[*]}"
+        printf '  确认后用 %s remove <订阅编号> 撤销。注意撤销地址不等于收回节点访问，\n' "$PROGRAM"
+        printf '  真正踢人要在面板删掉或更换该客户端的 UUID。\n'
+    fi
+}
+
+# 原生订阅正文里有两处每次请求都变的值：节点名尾部的剩余流量，以及 3x-ui 为
+# 每次请求随机生成的 spx（spiderX）。对比时把这两处归一化，其余部分仍逐字节比较。
+normalize_native() {
+    local input=$1 output=$2
+    if ! base64 -d <"$input" >"$output.decoded" 2>/dev/null; then
+        cp -- "$input" "$output.decoded"
+    fi
+    sed -E 's/(%7C%F0%9F%93%8A)[0-9.]+[A-Za-z]*/\1<traffic>/g; s/spx=[^&#]*/spx=<random>/g' \
+        "$output.decoded" >"$output"
+}
+
+cmd_test_one() {
+    local name=$1 source_url path body="$WORK_DIR/clash-${1}.yaml"
+    local uni="$WORK_DIR/uni-${1}"
+    local resolve=()
+    client_exists "$name" || fail "订阅编号不存在：$name"
+    source_url=$(jq -r --arg name "$name" '.clients[$name].source_url' "$STATE_FILE")
+    path=$(jq -r --arg name "$name" '.clients[$name].path' "$STATE_FILE")
+    mapfile -t resolve < <(source_resolve_args "$source_url")
+
+    printf '测试 %-24s ' "$name"
+    validate_source_and_conversion "$source_url" "test-${name}"
+
+    # 四发断言。退役 /clash/ 之前，Clash 分支是拿它做逐字节比对的；现在没有那个
+    # 参照物了，改为对分支响应本身做内容断言，再用 ?t=clash 与 UA 命中互为参照。
+    curl --fail --silent --show-error --max-time 90 \
+        --user-agent "ClashMetaForAndroid/2.11" \
+        --output "$body" "$(sub_url "$path")" >/dev/null \
+        || fail "订阅地址 Clash 分支请求失败：$name"
+    grep -q '^proxies:' "$body" || fail "Clash 分支响应缺少 proxies：$name"
+    grep -Eq "$NODE_PATTERN" "$body" || fail "Clash 分支响应未检测到代理节点：$name"
+    grep -q 'store-selected: true' "$body" || fail "Clash 分支响应缺少 profile.store-selected：$name"
+    # format: text 由 Nginx sub_filter 注入，本地 25500 直出里没有，所以只能在这里
+    # 断言。缺了它国内规则集不生效（incidents 2026-08-08）。
+    grep -q '    format: text' "$body" || fail "Clash 分支响应缺少 format: text，sub_filter 未生效：$name"
+    if grep -Fq '|📊' "$body"; then
+        fail "Clash 分支响应的节点名仍含流量后缀：$name"
+    fi
+    if grep -Fq -- "$source_url" "$body"; then
+        fail "Clash 分支响应意外包含原始订阅：$name"
+    fi
+
+    # 原生分支与直连原始订阅逐字节相同（§3.1 两处每次都变的值归一化后）。
+    # 「逐字节相同」比逐条 grep 强：Reality 参数被改写这类问题会直接暴露。
+    curl --fail --silent --show-error --max-time 30 \
+        --user-agent "Shadowrocket/2.2.65" --dump-header "$uni.headers" \
+        --output "$uni.raw" "$(sub_url "$path")" >/dev/null \
+        || fail "订阅地址原生分支请求失败：$name"
+    curl --fail --silent --show-error --location --max-time 30 \
+        --user-agent "Shadowrocket/2.2.65" \
+        "${resolve[@]}" \
+        --output "$uni.native" "$source_url" >/dev/null \
+        || fail "直连原始订阅失败：$name"
+    normalize_native "$uni.raw" "$uni.raw.norm"
+    normalize_native "$uni.native" "$uni.native.norm"
+    cmp -s "$uni.raw.norm" "$uni.native.norm" \
+        || fail "订阅地址原生分支与 3x-ui 原始订阅不一致：$name"
+    grep -qi '^profile-update-interval:' "$uni.headers" \
+        || fail "订阅地址原生分支丢失 Profile-Update-Interval：$name"
+    grep -qi '^vary:[[:space:]]*user-agent' "$uni.headers" \
+        || fail "订阅地址原生分支缺少 Vary: User-Agent：$name"
+    # 名称 header。两个分支各有来源，这里各守一边（README §3.4）。
+    grep -qi '^profile-title:' "$uni.headers" \
+        || fail "订阅地址原生分支缺少 Profile-Title，检查 3x-ui 订阅标题：$name"
+
+    curl --fail --silent --show-error --max-time 30 \
+        --user-agent "curl/8.5.0" \
+        --output "$uni.unknown" "$(sub_url "$path")" >/dev/null \
+        || fail "订阅地址未知 UA 请求失败：$name"
+    normalize_native "$uni.unknown" "$uni.unknown.norm"
+    cmp -s "$uni.unknown.norm" "$uni.native.norm" \
+        || fail "订阅地址未知 UA 未落到原生订阅：$name"
+
+    curl --fail --silent --show-error --max-time 90 \
+        --user-agent "curl/8.5.0" --dump-header "$uni.forced.headers" \
+        --output "$uni.forced" "$(sub_url "$path")?t=clash" >/dev/null \
+        || fail "订阅地址 ?t=clash 请求失败：$name"
+    cmp -s "$body" "$uni.forced" \
+        || fail "订阅地址 ?t=clash 与 UA 命中的输出不一致：$name"
+    grep -qi "^content-disposition:.*$PROFILE_NAME" "$uni.forced.headers" \
+        || fail "订阅地址 Clash 分支缺少 Content-Disposition 订阅名：$name"
+
+    printf '通过\n'
+}
+
+cmd_test() {
+    local name=${1:-}
+    local names=()
+    systemctl is-active --quiet subconverter.service || fail "subconverter.service 未运行。"
+    systemctl is-active --quiet nginx.service || fail "nginx.service 未运行。"
+    nginx -t >/dev/null 2>&1 || fail "当前 Nginx 配置无效。"
+
+    if [[ -n "$name" ]]; then
+        validate_name "$name"
+        cmd_test_one "$name"
+        return
+    fi
+    mapfile -t names < <(jq -r '.clients | keys[]' "$STATE_FILE")
+    [[ ${#names[@]} -gt 0 ]] || fail "尚未配置客户端。"
+    for name in "${names[@]}"; do
+        cmd_test_one "$name"
+    done
+}
+
+# 轮换随机路径。旧手段是 remove + add，但 add 要重新隐藏输入原始订阅 URL，
+# 且编号会往后推；这里只换路径，编号与 source_url 原样保留。
+# 复用 apply_state 的事务：候选配置先隔离校验，reload 失败自动回滚。
+cmd_rotate() {
+    local target=${1:-} answer candidate="$WORK_DIR/candidate.json"
+    local names=() name new_path
+    [[ -n "$target" ]] || fail "rotate 需要订阅编号或 --all。"
+
+    if [[ "$target" == "--all" ]]; then
+        mapfile -t names < <(jq -r '.clients | keys[]' "$STATE_FILE")
+        [[ ${#names[@]} -gt 0 ]] || fail "尚未配置订阅。"
+        printf '将轮换全部 %d 条订阅的随机路径。\n' "${#names[@]}"
+    else
+        validate_name "$target"
+        client_exists "$target" || fail "订阅编号不存在。"
+        names=("$target")
+        printf '将轮换订阅：%s\n' "$target"
+    fi
+
+    printf '旧地址会立即失效，所有设备都要重新配置。\n'
+    printf '确认轮换？[y/n] ' >&2
+    IFS= read -r answer
+    answer=${answer,,}
+    [[ "$answer" == "y" ]] || { printf '已取消，未做修改。\n' >&2; exit 1; }
+
+    cp -- "$STATE_FILE" "$candidate"
+    for name in "${names[@]}"; do
+        [[ -n "$name" ]] || continue
+        new_path=$(new_random_path "$candidate")
+        jq --arg name "$name" --arg path "$new_path" \
+            '.clients[$name].path = $path' "$candidate" >"$candidate.next"
+        mv -- "$candidate.next" "$candidate"
+    done
+    apply_state "$candidate"
+
+    printf '\n已轮换，新地址如下：\n\n'
+    for name in "${names[@]}"; do
+        [[ -n "$name" ]] || continue
+        new_path=$(jq -r --arg name "$name" '.clients[$name].path' "$STATE_FILE")
+        printf '%-10s ' "$name"
+        sub_url "$new_path"
+        printf '#%s\n' "$PROFILE_NAME"
+    done
+    printf '\n'
+}
+
+cmd_resync() {
+    local candidate="$WORK_DIR/candidate.json"
+    [[ $(jq '.clients | length' "$STATE_FILE") -gt 0 ]] || fail "尚未配置订阅。"
+    cp -- "$STATE_FILE" "$candidate"
+    printf '正在按当前模板重新生成 Nginx 配置...\n'
+    apply_state "$candidate"
+    printf '已重新生成，订阅编号与订阅地址均未改变（用 list 查看）。\n'
+}
+
+main() {
+    local command=${1:-help}
+    shift || true
+    require_root
+    require_commands
+    prepare_state
+
+    case "$command" in
+        add)
+            case $# in
+                0) cmd_add ;;
+                1) [[ "$1" == "--from-xui" ]] || fail "用法：$PROGRAM add [--from-xui]"
+                   cmd_add_from_xui ;;
+                *) fail "用法：$PROGRAM add [--from-xui]" ;;
+            esac
+            ;;
+        update) [[ $# -eq 1 ]] || fail "用法：$PROGRAM update <订阅编号>"; cmd_update "$1" ;;
+        remove) [[ $# -eq 1 ]] || fail "用法：$PROGRAM remove <订阅编号>"; cmd_remove "$1" ;;
+        renumber) [[ $# -eq 1 ]] || fail "用法：$PROGRAM renumber <起始编号>"; cmd_renumber "$1" ;;
+        list) [[ $# -eq 0 ]] || fail "用法：$PROGRAM list"; cmd_list ;;
+        test) [[ $# -le 1 ]] || fail "用法：$PROGRAM test [订阅编号]"; cmd_test "${1:-}" ;;
+        rotate) [[ $# -eq 1 ]] || fail "用法：$PROGRAM rotate <订阅编号>|--all"; cmd_rotate "$1" ;;
+        resync) [[ $# -eq 0 ]] || fail "用法：$PROGRAM resync"; cmd_resync ;;
+        help|-h|--help) usage ;;
+        *) usage >&2; fail "未知命令：$command" ;;
+    esac
+}
+
+main "$@"

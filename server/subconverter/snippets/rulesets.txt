@@ -1,0 +1,13 @@
+REJECT,clash-classic:https://sub.example.com:8443/r/<RULES_PREFIX>/Reject.list,1800
+DIRECT,clash-classic:https://sub.example.com:8443/r/<RULES_PREFIX>/ChinaDirect.list,1800
+DIRECT,clash-classic:https://cdn.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/LocalAreaNetwork.list,86400
+DIRECT,clash-classic:https://cdn.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/UnBan.list,86400
+DIRECT,clash-classic:https://cdn.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/Apple.list,86400
+REJECT,clash-classic:https://cdn.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/BanAD.list,86400
+REJECT,clash-classic:https://cdn.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/BanProgramAD.list,86400
+DIRECT,clash-classic:https://cdn.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/ChinaDomain.list,86400
+DIRECT,clash-classic:https://cdn.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/ChinaMedia.list,86400
+DIRECT,clash-classic:https://cdn.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/ChinaCompanyIp.list,86400
+DIRECT,clash-classic:https://cdn.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/Clash/ChinaIp.list,86400
+DIRECT,[]GEOIP,CN,no-resolve
+🚀节点选择,[]FINAL

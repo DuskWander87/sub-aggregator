@@ -1,0 +1,13 @@
+# Claude Code 本地配置不随仓库走；公开 skill 保留
+.claude/settings.local.json
+
+# 备份与临时文件（本仓库刚清理过一批，别再让它们进来）
+*.bak
+*.bak.*
+*.old
+*~
+*.swp
+
+# 系统噪声
+.DS_Store
+Thumbs.db

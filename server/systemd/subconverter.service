@@ -1,0 +1,21 @@
+[Unit]
+Description=Local subscription converter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/subconverter-classic
+ExecStart=/opt/subconverter-classic/subconverter -f /opt/subconverter-classic/pref.ini
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

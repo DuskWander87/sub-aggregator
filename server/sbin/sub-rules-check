@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# 诊断自维护规则集的整条分发链是否一致、同步器是否健康。
+#
+# 链路（2026-08-19 起）：
+#   GitHub origin/main
+#     └─ sub-rules-sync.timer 每分钟 fetch + ff-only 合并
+#        └─ /root/code/shadowrocket-config/rules/   （git 工作副本）
+#           └─ /var/lib/sub-rules/                （发布目录，nginx 直接 serve）
+#              └─ https://sub.example.com:8443/r/<RULES_PREFIX>/*.list
+#
+# 端点无缓存层，客户端单次拉取即拿到发布目录的当前内容。
+# 发布目录缺文件时才落到 GitHub 反代兜底（X-Rule-Source: github）。
+#
+# 本脚本纯诊断，不修改任何状态：用 git ls-remote 查远端，不做 fetch。
+#
+# 用法： sub-rules-check
+
+set -uo pipefail
+
+REPO_DIR=/root/code/shadowrocket-config
+PUBLISH_DIR=/var/lib/sub-rules
+BASE="https://sub.example.com:8443/r/<RULES_PREFIX>"
+FILES=(ChinaDirect Reject)
+STAMP="$PUBLISH_DIR/.last-sync"
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+rc=0
+
+# ── 同步器状态 ──────────────────────────────────────────────────────────
+# 中文标签按显示宽度手工对齐（printf 的 %-Ns 按字节数补位，CJK 会算错）
+printf '%s ' "同步定时器    "
+if systemctl is-active --quiet sub-rules-sync.timer; then
+    if [[ -r $STAMP ]]; then
+        age=$(( $(date -u +%s) - $(cat "$STAMP") ))
+        if (( age > 300 )); then
+            printf 'active，但最后一次成功拉取在 %s 秒前（异常，查 journalctl -u sub-rules-sync）\n' "$age"
+            rc=1
+        else
+            printf 'active，最后一次成功拉取 %s 秒前\n' "$age"
+        fi
+    else
+        printf 'active，但从未成功拉取过（查 journalctl -u sub-rules-sync）\n'
+        rc=1
+    fi
+else
+    printf 'INACTIVE —— 规则将停留在当前版本\n'
+    rc=1
+fi
+
+# ── git 工作副本与远端 ───────────────────────────────────────────────────
+printf '%s ' "git 工作副本  "
+if [[ -d $REPO_DIR/.git ]]; then
+    local_sha=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)
+    remote_sha=$(git -C "$REPO_DIR" ls-remote origin refs/heads/main 2>/dev/null | awk '{print $1}')
+    dirty=$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | head -1)
+
+    if [[ -z $remote_sha ]]; then
+        printf '%s（取不到远端，无法比对）\n' "${local_sha:0:7}"
+        rc=1
+    elif [[ $local_sha == "$remote_sha" ]]; then
+        printf '%s，与 origin/main 一致' "${local_sha:0:7}"
+        [[ -n $dirty ]] && { printf '，但工作区有未提交改动'; rc=1; }
+        printf '\n'
+    else
+        printf '%s，落后/偏离 origin/main（%s）\n' "${local_sha:0:7}" "${remote_sha:0:7}"
+        [[ -n $dirty ]] && echo "  工作区有未提交改动，ff-only 合并会被拒绝，同步已停滞"
+        rc=1
+    fi
+else
+    printf '仓库不存在：%s\n' "$REPO_DIR"
+    rc=1
+fi
+
+echo
+
+# ── 逐个文件比对整条链 ───────────────────────────────────────────────────
+for f in "${FILES[@]}"; do
+    printf '%-18s ' "${f}.list"
+
+    if ! curl -sSf --max-time 20 "${BASE}/${f}.list" -o "$tmp/ep" -D "$tmp/hdr" 2>/dev/null; then
+        echo "端点不可用"
+        rc=1
+        continue
+    fi
+
+    src=$(grep -i '^x-rule-source:' "$tmp/hdr" | tr -d '\r' | awk '{print $2}')
+    cache=$(grep -i '^x-rule-cache:' "$tmp/hdr" | tr -d '\r' | awk '{print $2}')
+    lines=$(grep -c '' "$tmp/ep")
+
+    if [[ $src == github ]]; then
+        printf '兜底路径（GitHub 反代，缓存 %s，%s 行）—— 发布目录里没有这个文件\n' \
+               "${cache:-?}" "$lines"
+        rc=1
+        continue
+    fi
+
+    pub="$PUBLISH_DIR/${f}.list"
+    repo="$REPO_DIR/rules/${f}.list"
+    problems=()
+
+    cmp -s "$tmp/ep" "$pub"  2>/dev/null || problems+=("端点≠发布目录")
+    cmp -s "$pub" "$repo"    2>/dev/null || problems+=("发布目录≠仓库")
+
+    if (( ${#problems[@]} == 0 )); then
+        printf 'local  %s 行  端点=发布目录=仓库\n' "$lines"
+    else
+        printf 'local  %s 行  不一致：%s\n' "$lines" "${problems[*]}"
+        rc=1
+    fi
+done
+
+echo
+echo "订阅中的引用："
+grep -E 'sub\.example\.com:8443/r/<RULES_PREFIX>/' /opt/subconverter-classic/snippets/rulesets.txt \
+    | sed 's/^/  /' || echo "  未在 rulesets.txt 中找到自托管 URL"
+
+echo
+if (( rc == 0 )); then
+    echo "结论：分发链一致。push 后最多 1 分钟发布，客户端点一次「更新规则集」即最新。"
+else
+    echo "结论：存在异常，见上。"
+fi
+
+exit "$rc"
