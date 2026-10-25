@@ -15,28 +15,41 @@
 
 ## 2. 用部署脚本
 
-脚本在 `tools/deploy.sh`，真实逻辑在
-[`.claude/skills/deploy-sub-aggregator/scripts/deploy.sh`](../../.claude/skills/deploy-sub-aggregator/scripts/deploy.sh)，
-两边共用一份实现。
+部署只有一个入口：`tools/deploy.sh`，不需要其他工具或中间层。
 
 ### 2.1 先看计划
 
 ```bash
-tools/deploy.sh --dry-run
+tools/deploy.sh --dry-run \
+  --domain sub.example.com \
+  --cert-dir /root/cert/sub.example.com \
+  --profile-name DuskWander
 ```
 
-按提示输入域名、证书目录和订阅显示名。dry-run 只做检查并打印计划，不改任何文件。
-
-如果用 Claude Code，可以直接调用 `deploy-sub-aggregator` skill。skill 会引导收集参数、先跑
-dry-run、解释计划，再在用户确认后执行。
+不带参数时脚本会逐项询问域名、证书目录和订阅显示名；参数传齐则不提问。dry-run 只做检查并
+打印计划，不改任何文件。
 
 ### 2.2 执行
 
 ```bash
-tools/deploy.sh
+tools/deploy.sh \
+  --domain sub.example.com \
+  --cert-dir /root/cert/sub.example.com \
+  --profile-name DuskWander
 ```
 
-默认每一步都会停下来确认。确认计划后，脚本会：
+默认每一步都会停下来确认。全参数加 `--yes` 可跳过确认；再配 `< /dev/null` 让脚本跳过创建
+订阅，适合无人值守执行：
+
+```bash
+tools/deploy.sh \
+  --domain sub.example.com \
+  --cert-dir /root/cert/sub.example.com \
+  --profile-name DuskWander \
+  --with-rules --yes < /dev/null
+```
+
+确认计划后，脚本会：
 
 1. 检查 root、依赖命令、x-ui 服务、数据库、证书、8443 端口和域名解析。
 2. 把 `server/` 复制到临时目录，替换域名、证书目录、显示名、规则前缀和规则仓库。
@@ -46,6 +59,9 @@ tools/deploy.sh
 6. 询问是否创建第一条订阅。创建后自动跑 `sub-manager test`。
 7. 如果加了 `--with-rules`，默认使用作者的规则集，工作副本不存在时自动克隆，然后启用同步
    定时器并跑一次 `sub-rules-check`。
+
+非交互执行（`< /dev/null`）会跳过第 6 步，之后手工运行 `sub-manager add --from-xui` 和
+`sub-manager test`。
 
 脚本不会修改 3x-ui、Xray 或 443 入站，也不会改动你的仓库工作副本。2096 收口需要手工执行，
 见 §3.5。

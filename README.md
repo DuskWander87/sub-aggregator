@@ -44,13 +44,7 @@ flowchart LR
 
 前提：一台跑着 3x-ui 的 Ubuntu 服务器，443 上有一个可用的 VLESS Reality 入站；一个指向它的域名和证书；root 权限和至少 2 GB 内存。
 
-用 Claude Code 部署：
-
-```text
-/deploy-sub-aggregator
-```
-
-手动执行，在仓库根目录先看计划再应用：
+在仓库根目录先看计划再应用：
 
 ```bash
 git clone https://github.com/DuskWander87/sub-aggregator.git
@@ -96,8 +90,7 @@ server/            真机配置的脱敏拷贝，靠人手工同步
   nginx/           订阅入口片段、规则端点、缓存区
   subconverter/    pref.ini、Mihomo 模板、自维护 snippets
   systemd/         转换后端与规则同步单元
-tools/             部署入口 deploy.sh
-.claude/skills/    公开的 deploy-sub-aggregator skill
+tools/             部署脚本 deploy.sh
 docs/              中文运维文档
   sub/             订阅聚合服务：部署、订阅入口、设计、操作、故障记录
   3x-ui/           3x-ui / Reality 底座：故障排查归档
