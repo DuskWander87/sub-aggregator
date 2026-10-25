@@ -76,20 +76,20 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 /etc/x-ui/x-ui.db                       # 3x-ui 数据库
 ```
 
-端口分工（当前实际监听，勿冲突）。此表与 `docs/sub/README.md` §3.1 是同一份清单，改一处
-必须同步另一处：
+端口分工（固定分配，勿冲突）。此表与 `docs/sub/README.md` §3.1 是同一份清单，改一处必须
+同步另一处；面板端口不占固定分配，见下方说明：
 
 | 端口 | 服务 |
 |---|---|
 | `80` | Nginx（仅 ACME HTTP-01 挑战） |
 | `443` | Xray VLESS Reality（**不要碰**） |
 | `2096` | 3x-ui 原生订阅（仅 `127.0.0.1`；订阅入口原生分支的回源目标） |
-| `2053` | 3x-ui 面板（端口/路径由面板设置决定，当前 `2053`） |
 | `8443` | Nginx（订阅入口 + 自维护规则端点） |
 | `25500` | Subconverter（**仅 `127.0.0.1`**） |
 
-`2096` 和面板端口来自 3x-ui 的设置（`subPort` / `webPort`），不是固定契约；改设置后同步本表
-与 README §3.1。面板路径（`webBasePath`）是随机值，不写进文档。
+3x-ui 面板端口/路径由面板设置（`webPort` / `webBasePath`）决定，不占固定端口，也不写进
+本表；用 `ss -lntp | grep x-ui` 查当前值。`2096` 来自 `subPort`，改端口后同步本表与
+README §3.1。
 
 ## `server/` 公开镜像
 
@@ -148,7 +148,8 @@ systemctl restart subconverter && sub-manager resync
 
 ```bash
 systemctl is-active x-ui subconverter nginx
-ss -lntp | grep -E ':(80|443|2096|2053|8443|25500)\b'   # 2096 应只有 127.0.0.1；面板端口以设置为准
+ss -lntp | grep -E ':(80|443|2096|8443|25500)\b'   # 2096 应只有 127.0.0.1
+ss -lntp | grep x-ui                               # 面板端口随面板设置变化
 getent hosts sub.example.com                            # 占位符换成实际订阅域名；应返回 127.0.0.1
 curl -fsS http://127.0.0.1:25500/version
 nginx -t
