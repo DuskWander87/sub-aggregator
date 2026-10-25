@@ -8,8 +8,10 @@
 - Ubuntu 24.04，具有 root 权限。
 - 3x-ui 已运行，443 上有一个可用的 VLESS Reality 入站。
 - 域名已经指向这台服务器（签发证书需要公网 80 端口可达）。
-- 已安装 `curl`、`jq`、`sqlite3`、`openssl`、`flock`、`git`、Nginx 和 systemd。
-  缺少时脚本会打印一条可以直接复制的 `apt-get install` 命令后退出。
+- 依赖命令：`curl`、`jq`、`sqlite3`、`openssl`、`flock`、Nginx、systemd 等（`--with-rules` 时
+  还有 `git`）。脚本在提问前统一检查，缺失时列出命令和对应 apt 包并询问是否安装，确认后执行
+  `apt-get update` 和 `apt-get install -y` 再继续；拒绝或非交互运行时打印可以直接复制的
+  `apt-get install` 命令后退出。
 - 至少 2 GB 内存。
 
 域名也不需要手工提供：脚本按已安装的 `sub-manager`、3x-ui 的 `subDomain` / `webDomain`、
@@ -37,7 +39,8 @@ tools/deploy.sh --dry-run \
 
 不带参数时脚本只询问订阅显示名（首次自动签发且没装 acme.sh 时还会问一个可留空的邮箱）；
 域名从 3x-ui 配置或证书推导，证书目录由域名推导，规则前缀、规则仓库都有默认值。dry-run
-只做检查并打印计划，不改任何文件。证书会显示为「复用已有」或「acme.sh 签发」。
+只做检查并打印计划，不改任何文件；缺少依赖也只报告，不安装。证书会显示为「复用已有」或
+「acme.sh 签发」。
 
 ### 2.2 执行
 
@@ -55,7 +58,8 @@ tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
 
 确认计划后，脚本会：
 
-1. 检查 root、依赖命令、x-ui 服务与数据库、443 入站、2096 监听、8443 端口和域名解析。
+1. 检查 root 和依赖命令（缺失时先统一提示安装），再检查 x-ui 服务与数据库、443 入站、
+   2096 监听、8443 端口和域名解析。
    3x-ui 只读不写；443 入站或 2096 收口不符合预期时给出警告。
 2. 把 `server/` 复制到临时目录，替换域名、证书目录、显示名、规则前缀和规则仓库。
 3. 把要覆盖的文件备份到 `/root/sub-aggregator-backup-<时间戳>-<pid>/`。
@@ -81,13 +85,13 @@ tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
 | `--cert-dir <目录>` | 证书目录；默认自动查找，缺失时签发到 `/root/cert/<域名>` |
 | `--acme-email <邮箱>` | 首次安装 acme.sh 时注册账户用，可留空 |
 | `--no-issue-cert` | 缺少证书时不自动签发，直接报错 |
-| `--profile-name <名称>` | 订阅显示名，纯 ASCII，默认 `sub-aggregator` |
+| `--profile-name <名称>` | 订阅显示名，纯 ASCII，默认 `DuskWander87` |
 | `--rules-prefix <hex>` | 规则端点前缀，默认随机生成 24 位 hex |
 | `--rules-repo <owner/repo>` | 规则仓库，默认 `DuskWander87/shadowrocket-config`；自定义时传 fork 的 owner/repo |
 | `--rules-workdir <目录>` | 规则仓库的本机 git 工作副本，默认 `/root/code/shadowrocket-config` |
 | `--with-rules` | 启用 `sub-rules-sync.timer`；默认使用作者的规则集 |
 | `--dry-run` | 只打印计划，不做修改 |
-| `--yes` / `-y` | 跳过逐步确认 |
+| `--yes` / `-y` | 跳过逐步确认；依赖缺失时直接安装 |
 | `--rollback <备份目录>` | 从备份目录恢复 |
 
 重装时，脚本会从已安装的 `sub-manager`、`sub-rules.conf` 和 `sub-rules-sync` 里读取域名、
@@ -144,12 +148,12 @@ grep -rn 'sub.example.com\|<RULES_PREFIX>\|DuskWander\|shadowrocket-config' serv
 | `sub.example.com` | 订阅域名 | `sub-manager`、`sub-rules-check`、`rulesets.txt`、`nginx/conf.d/acme-challenge.conf` |
 | `<RULES_PREFIX>` | 规则端点前缀，可用 `openssl rand -hex 12` 生成 | `sub-rules.conf`、`rulesets.txt`、`sub-rules-check` |
 | `/root/cert/sub.example.com/` | 证书目录 | `sub-manager` |
-| `DuskWander` | 订阅显示名 | `sub-manager`，同时要改 3x-ui 面板的「订阅标题」 |
+| `DuskWander` | 订阅显示名 | `sub-manager` 的 `PROFILE_NAME`（两个分支同源，不必改面板） |
 | `DuskWander87/shadowrocket-config` | GitHub 兜底规则仓库 | `sub-rules.conf` |
 | `/root/code/shadowrocket-config` | 规则仓库的本机工作副本 | `sub-rules-check`、`sub-rules-sync`、`sub-rules-sync.service` |
 
-前 3 行必须换成你自己的值。后 3 行按你的显示名和规则仓库调整。订阅名保持纯 ASCII，三处要
-一致，细节见 [README.md](README.md) §3.4。改完 `sub-manager` 里的常量后，把脚本重新装到
+前 3 行必须换成你自己的值。后 3 行按你的显示名和规则仓库调整。订阅名保持纯 ASCII，两个
+服务器侧分支由同一个常量派生，细节见 [README.md](README.md) §3.4。改完 `sub-manager` 里的常量后，把脚本重新装到
 `/usr/local/sbin/`，再跑 `sub-manager resync`。
 
 ### 3.2 放置文件

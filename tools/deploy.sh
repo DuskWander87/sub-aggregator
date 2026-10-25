@@ -29,7 +29,6 @@ readonly DEFAULT_CERT_ROOT="/root/cert"
 readonly ACME_HOME="/root/.acme.sh"
 readonly ACME_WEBROOT="/var/www/acme"
 readonly ACME_NGINX_CONF="$NGINX_CONF_D_DIR/acme-challenge.conf"
-readonly APT_PACKAGES="curl jq sqlite3 openssl util-linux nginx tar iproute2 libc-bin gawk"
 
 DOMAIN=""
 DOMAIN_CANDIDATE=""
@@ -60,13 +59,13 @@ usage() {
   --cert-dir <目录>         证书目录；默认自动查找，缺失时签发到 /root/cert/<域名>
   --acme-email <邮箱>       首次安装 acme.sh 时注册账户用，可留空
   --no-issue-cert           缺少证书时不自动签发，直接报错
-  --profile-name <名称>     订阅显示名，纯 ASCII
+  --profile-name <名称>     订阅显示名，纯 ASCII（默认 DuskWander87）
   --rules-prefix <hex>      规则端点前缀，默认随机生成 24 位 hex
   --rules-repo <owner/repo> 规则仓库，默认 DuskWander87/shadowrocket-config
   --rules-workdir <目录>    规则仓库本机工作副本，默认 /root/code/shadowrocket-config
   --with-rules              启用规则同步定时器；默认使用作者的规则集
   --dry-run                 只打印计划，不做修改
-  --yes, -y                 跳过逐步确认
+  --yes, -y                 跳过逐步确认；依赖缺失时直接安装
   --rollback <备份目录>     从备份目录恢复
   -h, --help                显示这份帮助
 
@@ -326,7 +325,7 @@ prompt_acme_email() {
 
 prompt_values() {
     prompt_value DOMAIN "订阅域名" ""
-    prompt_value PROFILE_NAME "订阅显示名（纯 ASCII）" "sub-aggregator"
+    prompt_value PROFILE_NAME "订阅显示名（纯 ASCII）" "DuskWander87"
     [[ -n $RULES_PREFIX ]] || RULES_PREFIX=$(openssl rand -hex 12)
     [[ -n $RULES_REPO ]] || RULES_REPO=$DEFAULT_RULES_REPO
 }
@@ -361,21 +360,95 @@ xui_query() {
         "file:${XUI_DB}?mode=ro" "$1"
 }
 
+# 命令 → apt 包。只安装缺失命令对应的包；未列出的命令视为基础系统自带，缺失时直接报错，
+# 不盲目装包。
+command_package() {
+    case $1 in
+        curl) printf '%s\n' curl ;;
+        jq) printf '%s\n' jq ;;
+        sqlite3) printf '%s\n' sqlite3 ;;
+        openssl) printf '%s\n' openssl ;;
+        flock) printf '%s\n' util-linux ;;
+        nginx) printf '%s\n' nginx ;;
+        systemctl) printf '%s\n' systemd ;;
+        tar) printf '%s\n' tar ;;
+        install|mktemp) printf '%s\n' coreutils ;;
+        sed) printf '%s\n' sed ;;
+        grep) printf '%s\n' grep ;;
+        getent) printf '%s\n' libc-bin ;;
+        ss) printf '%s\n' iproute2 ;;
+        awk) printf '%s\n' gawk ;;
+        git) printf '%s\n' git ;;
+        *) return 1 ;;
+    esac
+}
+
+# 收集缺失命令及对应包。有缺失时返回 0，全部就绪时返回 1。
+# 结果放在全局变量里，避免在命令替换的子 shell 中 fail 只退出子 shell。
+MISSING_COMMANDS=()
+MISSING_PACKAGES=()
+
+collect_missing_dependencies() {
+    local cmd pkg existing
+    local -a commands=(
+        curl jq sqlite3 openssl flock nginx systemctl tar
+        install sed grep mktemp getent ss awk
+    )
+    [[ $WITH_RULES -eq 1 ]] && commands+=(git)
+
+    MISSING_COMMANDS=()
+    MISSING_PACKAGES=()
+    for cmd in "${commands[@]}"; do
+        if have "$cmd"; then
+            continue
+        fi
+        MISSING_COMMANDS+=("$cmd")
+        pkg=$(command_package "$cmd") \
+            || fail "缺少命令 $cmd，且不知道它属于哪个 apt 包；请手工安装后重跑。"
+        for existing in "${MISSING_PACKAGES[@]}"; do
+            [[ $existing == "$pkg" ]] && continue 2
+        done
+        MISSING_PACKAGES+=("$pkg")
+    done
+    ((${#MISSING_COMMANDS[@]} > 0))
+}
+
+ensure_dependencies() {
+    collect_missing_dependencies || return 0
+
+    local cmd still=()
+    local cmd_list="${MISSING_COMMANDS[*]}"
+    local pkg_list="${MISSING_PACKAGES[*]}"
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+        warn "缺少依赖命令：$cmd_list（对应包：$pkg_list）"
+        log "dry-run 不安装依赖；正式执行时会统一提示，确认后自动安装。"
+        return 0
+    fi
+
+    warn "缺少依赖命令：$cmd_list"
+    log "对应 apt 包：$pkg_list"
+    if [[ $ASSUME_YES -eq 0 && ! -t 0 ]]; then
+        fail "当前不是交互式终端，无法确认安装。手工执行：apt-get update && apt-get install -y $pkg_list（或加 --yes 自动安装）"
+    fi
+    if ! confirm "现在安装？"; then
+        fail "未安装依赖。手工执行：apt-get update && apt-get install -y $pkg_list"
+    fi
+
+    log "运行 apt-get update"
+    apt-get update
+    log "安装：$pkg_list"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${MISSING_PACKAGES[@]}"
+
+    for cmd in "${MISSING_COMMANDS[@]}"; do
+        have "$cmd" || still+=("$cmd")
+    done
+    ((${#still[@]} == 0)) || fail "安装后仍缺少命令：${still[*]}"
+    log "依赖已就绪。"
+}
+
 preflight() {
     require_root
-
-    local cmd missing=()
-    for cmd in curl jq sqlite3 openssl flock nginx systemctl tar install sed grep mktemp getent ss awk; do
-        have "$cmd" || missing+=("$cmd")
-    done
-    if [[ $WITH_RULES -eq 1 ]]; then
-        have git || missing+=("git")
-    fi
-    if ((${#missing[@]} > 0)); then
-        printf '错误：缺少命令：%s\n' "${missing[*]}" >&2
-        printf '安装后重跑：apt-get update && apt-get install -y %s\n' "$APT_PACKAGES" >&2
-        exit 1
-    fi
 
     [[ -r $XUI_DB ]] || fail "读不到 3x-ui 数据库：$XUI_DB。先确认 3x-ui 已安装。"
     systemctl is-active --quiet x-ui.service || fail "x-ui.service 未运行。"
@@ -393,7 +466,10 @@ preflight() {
 
     local sub_listen="" entry bad=0
     local -a entries=()
-    sub_listen=$(ss -lnt 2>/dev/null | awk '$4 ~ /:2096$/ {print $4}' | paste -sd, -)
+    # dry-run 允许在缺依赖的机器上跑，ss 缺失时跳过端口检查而不是中断。
+    if have ss; then
+        sub_listen=$(ss -lnt 2>/dev/null | awk '$4 ~ /:2096$/ {print $4}' | paste -sd, -)
+    fi
     if [[ -z $sub_listen ]]; then
         warn "2096 未监听：3x-ui 订阅服务可能未启用，原生分支不可用。"
     else
@@ -412,7 +488,8 @@ preflight() {
         if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]]; then
             fail "现有 $NGINX_CONF_D_DIR/private-sub.conf 引用的证书缺失，Nginx 无法重载。先恢复证书，或删掉该文件后重跑。"
         fi
-        if ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE '[:.]80$' \
+        if have ss \
+            && ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE '[:.]80$' \
             && ! ss -lntp 2>/dev/null | grep -E '[:.]80[[:space:]]' | grep -q 'nginx'; then
             fail "端口 80 已被其他进程占用，ACME HTTP-01 无法通过。先释放 80 端口。"
         fi
@@ -440,7 +517,7 @@ preflight() {
         warn "域名未指向 127.0.0.1；Clash 分支依赖 /etc/hosts 回源，见 deploy.md §3.5。"
     fi
 
-    if ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE '[:.]8443$'; then
+    if have ss && ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE '[:.]8443$'; then
         if ss -lntp 2>/dev/null | grep -E '[:.]8443[[:space:]]' | grep -q 'nginx'; then
             warn "端口 8443 已有 nginx 监听，将复用现有 Nginx。"
         else
@@ -842,6 +919,11 @@ main() {
         do_rollback
         return 0
     fi
+
+    # 依赖先于提问检查：缺包时一次性列出并询问是否安装，不让用户答完问题才发现装不了。
+    # dry-run 只报告，不改系统。
+    require_root
+    ensure_dependencies
 
     detect_existing_values
     detect_domain

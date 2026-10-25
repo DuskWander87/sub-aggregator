@@ -166,9 +166,10 @@ nginx -t
   分隔符开关；唯一替代是 `emoji=false` + 手工 `rename`，代价见 design §6.2，机制见
   README §3.3。策略组名 `🚀节点选择` 是另一回事：改它要同步 `groups.txt`、
   `rulesets.txt` 的 `[]FINAL` 和脚本断言，逐字节一致。
-- **订阅名三处对齐**：Clash 分支取 `PROFILE_NAME`（`Content-Disposition`），原生分支取面板
-  「订阅标题」（`Profile-Title`），Shadowrocket 只认 URL fragment `#<订阅名>`；前两处双写
-  消不掉，名字保持纯 ASCII。当前值见 README §3.4。incidents `2026-08-22`
+- **订阅名两处同源**：Clash 分支取 `PROFILE_NAME`（`Content-Disposition`），原生分支由 Nginx
+  用同一个常量覆盖上游 `Profile-Title`，不读 3x-ui 面板的「订阅标题」；Shadowrocket 只认 URL
+  fragment `#<订阅名>`，那是客户端本地行为。改 `PROFILE_NAME` 后 `resync` 即可，名字保持纯
+  ASCII。当前值见 README §3.4。incidents `2026-08-22`
 - **改路径 = 所有设备重配**：只有 `rotate` 会换路径，它保留编号与原始订阅，不必重输 URL；
   `resync` 只重建 Nginx 配置，编号和地址都不动。
 - **`renumber` 只改编号**：`path`、源订阅和节点都不动，设备无需重配；但记住的旧编号会失效，

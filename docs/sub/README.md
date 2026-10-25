@@ -151,32 +151,29 @@ https://sub.example.com:8443/<48 位随机 hex>#DuskWander
 
 `sub-manager list` 直接输出带 fragment 的完整地址，整条粘进客户端即可。
 
-客户端订阅卡片上显示的名称当前是 `DuskWander`。**三个客户端取名的方式各不相同，必须三处
-对齐**：
+客户端订阅卡片上显示的名称当前是 `DuskWander`。服务器侧只有一个命名来源，客户端侧另有一处：
 
 | 取名方 | 名称来源 | 改哪里 |
 |---|---|---|
 | Clash 家族 | Nginx 的 `Content-Disposition` 响应头 | `sub-manager` 的常量 `PROFILE_NAME`，改完 `resync` |
-| 3x-ui 原生分支 | 透传的 `Profile-Title` 响应头（值带 `base64:` 前缀） | 面板 → 设置 → 订阅 → 通用 → 订阅标题（后端 setting key `subTitle`） |
+| 3x-ui 原生分支 | Nginx 覆盖过的 `Profile-Title` 响应头（值带 `base64:` 前缀） | 同上，`resync` 后两个分支一起变 |
 | Shadowrocket | **URL fragment `#DuskWander`**，服务器完全管不着 | 客户端里手工填，或粘贴 `list` 输出的完整地址 |
 
-前两处是服务器侧的双写点，**消不掉**：Clash 分支的响应由 subconverter 生成、根本不经过
-3x-ui，拿不到 `Profile-Title`。只改一处，同一条链接在两类客户端上会显示两个名字。
-`sub-manager test` 对两者都有断言，改完跑一次即可发现漏改。
+前两处都由 `PROFILE_NAME` 生成：Clash 分支的响应由 subconverter 拼装，原生分支则在 Nginx 层
+把上游的 `Profile-Title` 覆盖掉，因此改一个常量跑一次 `resync` 即可。3x-ui 面板的「订阅标题」
+不参与聚合入口的命名，留空也不影响：原生分支在 Nginx 层覆盖上游值，`2096` 又只监听回环，
+面板值没有其他消费者，命名只有一个需要人维护的入口。`sub-manager test` 对两个响应头各有一条
+断言，值不一致会报错。
 
-第三处是客户端行为，不是服务器缺陷。实测（`incidents.md` `2026-08-22`）Shadowrocket 收到了
-`Profile-Title` 却不采信，它的订阅名是本地备注字段，只有 URL fragment 能给初值。fragment
-由客户端本地截断，**不会发给服务器**，因此既不影响分流也不进日志。
+Shadowrocket 那行是客户端行为，不是服务器缺陷。实测（`incidents.md` `2026-08-22`）
+Shadowrocket 收到了 `Profile-Title` 却不采信，它的订阅名是本地备注字段，只有 URL fragment
+能给初值。fragment 由客户端本地截断，**不会发给服务器**，因此既不影响分流也不进日志。
 
 两个约束：
 
 - `Content-Disposition` 同时写 `filename="..."` 与 `filename*=UTF-8''...`。RFC 6266 允许并存，
   新解析器优先取后者，只认前者的老解析器也不会落空。
-- 名字**保持纯 ASCII**。`filename=` 那一份不做编码，非 ASCII 会失真。3x-ui 侧的
-  `Profile-Title` 有 base64 保护，但三边要一致，所以按最严的那边来。
+- 名字**保持纯 ASCII**。`filename=` 那一份不做编码，非 ASCII 会失真；原生分支的
+  `Profile-Title` 有 base64 保护，但两处要一致，所以按最严的那边来。
 
-3x-ui 的订阅标题支持 `{{EMAIL}}`、`{{ID}}`、`{{SHORT_ID}}`、`{{SUB_ID}}`、`{{TELEGRAM_ID}}`
-占位符，按客户端逐个渲染。**不要用**，用了每台设备显示的名字就不一样，也无法与另外两处的
-静态名对齐。
-
-改名后跑 `sub-manager resync` 并重启 x-ui，验证见 [operations.md](operations.md) §3.1。
+改名后跑 `sub-manager resync`，验证见 [operations.md](operations.md) §3.1。

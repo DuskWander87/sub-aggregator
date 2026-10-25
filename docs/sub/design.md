@@ -206,8 +206,9 @@ https://sub.example.com:8443/<48 位随机 hex>
 服务。
 
 Clash 客户端中显示的订阅名称由 Nginx 的 `Content-Disposition` 响应头提供；Subconverter 原始
-响应头会被 `proxy_hide_header` 隐藏，避免默认的 `clash.yaml` 覆盖自定义名称。名称本身和它与
-原生分支 `Profile-Title` 的对齐要求，见 [README.md](README.md) §3.4，那里是单一事实源。
+响应头会被 `proxy_hide_header` 隐藏，避免默认的 `clash.yaml` 覆盖自定义名称。原生分支的
+`Profile-Title` 同样由脚本生成并覆盖上游值，两个分支的名字因此只有一个来源。名称细节见
+[README.md](README.md) §3.4，那里是单一事实源。
 
 检查和加载配置：
 

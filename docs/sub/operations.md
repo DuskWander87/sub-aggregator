@@ -311,14 +311,14 @@ curl -fsS http://127.0.0.1:25500/version
 nginx -t
 ```
 
-订阅显示名称（两个分支必须返回同一个名字，来源不同，见 [README.md](README.md) §3.4）：
+订阅显示名称（两个分支由同一个常量生成，见 [README.md](README.md) §3.4）：
 
 ```bash
 # Clash 分支：Content-Disposition 双写 filename / filename*
 curl -ksS -o /dev/null -D - -H 'User-Agent: clash-verge/v2' \
   https://sub.example.com:8443/<随机路径> | grep -i disposition
 
-# 原生分支：Profile-Title，值是 base64:，解出来应与上面一致
+# 原生分支：Profile-Title，base64: 前缀；解码后应与 PROFILE_NAME 一致
 curl -ksS -o /dev/null -D - -H 'User-Agent: Shadowrocket/2' \
   https://sub.example.com:8443/<随机路径> | grep -i profile-title
 ```
@@ -354,7 +354,8 @@ journalctl -u subconverter.service -u nginx.service \
 `cmd_test_one` 对订阅入口另跑四发 UA 断言（见
 [unified-subscription.md](unified-subscription.md) §7）。其中三项是本层独有、上面这份清单
 覆盖不到的：`format: text`（由 Nginx `sub_filter` 注入，本地直出里没有）、`Profile-Title`
-与 `Content-Disposition`（两个分支各自的订阅名来源，见 [README.md](README.md) §3.4）。
+与 `Content-Disposition`（两个分支的订阅名，均由 `PROFILE_NAME` 生成，见
+[README.md](README.md) §3.4）。
 
 #### 3.2.2 转换输出应有的形态
 

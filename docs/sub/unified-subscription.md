@@ -58,12 +58,12 @@ UA 白名单（脚本常量 `UA_CLASH_PATTERN`，大小写不敏感）：
 | 分支 | 内容 | 与源头的关系 |
 |---|---|---|
 | Clash | 完整 Mihomo YAML，含 `rule-providers`、fake-ip DNS、单策略组 | 与本机 subconverter 直出一致，外加 Nginx `sub_filter` 注入的 `format: text` |
-| 原生 | 3x-ui 的 Base64 节点列表原文 | 与回环直连 `2096` 原始订阅**逐字节相同**（两处每次请求都变的值除外，见下） |
+| 原生 | 3x-ui 的 Base64 节点列表原文 | 正文与回环直连 `2096` 原始订阅**逐字节相同**（两处每次请求都变的值除外，见下） |
 
 原生分支保留上游全部响应头，包括 `Profile-Update-Interval`、`Profile-Web-Page-Url`、
-`Subscription-Userinfo`，以及订阅显示名称所在的 `Profile-Title`；不加 `Content-Disposition`
-（那是 Clash 分支的取名方式）。**两个分支的名字各有来源，必须人工对齐**，见
-[README.md](README.md) §3.4。
+`Subscription-Userinfo`；唯一被覆盖的是 `Profile-Title`，由 Nginx 用 `sub-manager` 的
+`PROFILE_NAME` 重写（`base64:` 前缀），因此两个分支的名字同源。不加 `Content-Disposition`
+（那是 Clash 分支的取名方式）。命名细节见 [README.md](README.md) §3.4。
 
 两个分支都加 `Vary: User-Agent`。**这条不能少**：同一个 URL 按 UA 返回两种格式，缺了它
 客户端本地缓存或任何中间缓存都可能把 Clash 配置喂给 Shadowrocket。
@@ -188,7 +188,8 @@ sub-manager test         # 全部订阅通过
 
 其中 `format: text` 由 Nginx `sub_filter` 注入，本机 subconverter 直出里没有，所以只能在这
 一层断言：它守的是 [incidents.md](incidents.md) `2026-08-08` 那个坑。两个名称 header
-（`Profile-Title` 与 `Content-Disposition`）各守一边，漏改任一处都会在这里报错。
+（`Profile-Title` 与 `Content-Disposition`）的值都来自 `PROFILE_NAME`，Nginx 覆盖失效或常量
+与预期不一致都会在这里报错。
 
 手工核对时的探针（`<订阅地址>` 换成 `sub-manager list` 里的地址，去掉 fragment）：
 
