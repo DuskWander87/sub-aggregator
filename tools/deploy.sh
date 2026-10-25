@@ -630,6 +630,34 @@ print_plan() {
 EOF
 }
 
+# 正式部署前的确认摘要。静态的安装清单只在 dry-run 里展开；这里只列本次运行
+# 会变化、确认时值得看一眼的值。
+print_summary() {
+    local cert_state rules_state
+    if [[ $CERT_NEEDS_ISSUE -eq 1 ]]; then
+        cert_state="acme.sh 签发到 $CERT_DIR"
+    else
+        cert_state="复用 $CERT_DIR"
+    fi
+    if [[ $WITH_RULES -eq 1 ]]; then
+        rules_state="启用 sub-rules-sync.timer"
+    else
+        rules_state="不启用（需要时加 --with-rules）"
+    fi
+    cat <<EOF
+部署配置
+
+  域名:           $DOMAIN
+  证书:           $cert_state
+  订阅显示名:     $PROFILE_NAME
+  规则端点前缀:   $RULES_PREFIX
+  规则仓库:       $RULES_REPO
+  规则工作副本:   $RULES_WORKDIR
+  规则链:         $rules_state
+  备份目录:       $BACKUP_DIR
+EOF
+}
+
 sed_pattern() { printf '%s' "$1" | sed 's/[\\.]/\\&/g'; }
 sed_replacement() { printf '%s' "$1" | sed 's/[&|\\]/\\&/g'; }
 
@@ -859,9 +887,16 @@ install_files() {
     systemctl daemon-reload
     systemctl enable subconverter
     systemctl restart subconverter
-    curl -fsS --max-time 10 --retry 3 --retry-delay 1 \
+    # restart 返回时进程可能还没开始监听：subconverter 要先读完 base/ 与 snippets/。
+    # 普通 --retry 不重试「连接被拒」，必须加 --retry-connrefused。
+    curl -fsS --max-time 10 --retry 15 --retry-delay 1 --retry-connrefused \
         http://127.0.0.1:25500/version >/dev/null \
-        || fail "subconverter 未在 127.0.0.1:25500 响应。"
+        || fail "subconverter 未在 127.0.0.1:25500 响应。查看 journalctl -u subconverter -n 50。"
+
+    # proxy_cache_path 不会自己建目录，父目录缺失时 nginx -t 的 mkdir() 会失败。
+    # 缓存目录属主与 nginx.conf 的 user 一致，规则缓存才能写入。
+    [[ -d /var/cache/nginx ]] || install -d -m 0755 /var/cache/nginx
+    install -d -o www-data -g www-data -m 0700 /var/cache/nginx/sub-rules
 
     nginx -t
     if systemctl is-active --quiet nginx.service; then
@@ -986,14 +1021,15 @@ main() {
 
     BACKUP_DIR="/root/sub-aggregator-backup-$(date -u +%Y%m%dT%H%M%SZ)-$$"
     init_targets
-    print_plan
 
     if [[ $DRY_RUN -eq 1 ]]; then
+        print_plan
         log "dry-run：未做任何修改。"
         return 0
     fi
 
-    confirm "按上面的计划继续？" || { log "已取消。"; return 0; }
+    print_summary
+    confirm "按上面的配置继续？" || { log "已取消。"; return 0; }
 
     do_backup
     stage

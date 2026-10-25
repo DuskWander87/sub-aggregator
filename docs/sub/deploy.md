@@ -57,14 +57,14 @@ tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
   --with-rules --yes < /dev/null
 ```
 
-确认计划后，脚本会：
+确认部署配置后，脚本会：
 
 1. 检查 root 和依赖命令（交互式下先问订阅域名与显示名；缺失时统一提示安装），再检查
    x-ui 服务与数据库、443 入站、2096 监听、8443 端口和域名解析。
    3x-ui 只读不写；443 入站或 2096 收口不符合预期时给出警告。
 2. 把 `server/` 复制到临时目录，替换域名、证书目录、显示名、规则前缀和规则仓库。
 3. 把要覆盖的文件备份到 `/root/sub-aggregator-backup-<时间戳>-<pid>/`。
-4. 安装 subconverter、管理脚本、systemd 单元、Nginx 片段和 ACME 挑战路径。
+4. 安装 subconverter、管理脚本、systemd 单元、Nginx 片段、兜底缓存目录和 ACME 挑战路径。
 5. 重启 subconverter，校验并启动/重载 Nginx。
 6. 缺少证书时安装 acme.sh、用 webroot 签发到 `/root/cert/<域名>/`；已有 acme.sh 配置是
    standalone 时改成 webroot，并确保续期后 reload Nginx（见 §2.4）。
@@ -179,11 +179,13 @@ install -m 0644 server/systemd/subconverter.service \
 systemctl daemon-reload
 systemctl enable --now subconverter
 
-# Nginx 片段与 ACME 挑战路径
+# Nginx 片段、兜底缓存目录与 ACME 挑战路径
 install -m 0644 server/nginx/snippets/sub-rules*.conf /etc/nginx/snippets/
 install -m 0644 server/nginx/conf.d/sub-rules-cache.conf /etc/nginx/conf.d/
 install -m 0644 server/nginx/conf.d/acme-challenge.conf /etc/nginx/conf.d/
 install -d -m 0755 /var/www/acme
+install -d -m 0755 /var/cache/nginx
+install -d -o www-data -g www-data -m 0700 /var/cache/nginx/sub-rules
 nginx -t && systemctl reload nginx
 ```
 

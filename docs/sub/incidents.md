@@ -8,6 +8,58 @@
 
 ---
 
+## 2026-10-25 首次部署在 subconverter 健康检查处中止
+
+### 现象
+
+`tools/deploy.sh` 首次部署，安装完 subconverter 后立即退出：
+
+```text
+Created symlink /etc/systemd/system/multi-user.target.wants/subconverter.service → /etc/systemd/system/subconverter.service.
+curl: (7) Failed to connect to 127.0.0.1 port 25500 after 0 ms: Couldn't connect to server
+✗ 错误：subconverter 未在 127.0.0.1:25500 响应。
+```
+
+随后 `systemctl status subconverter` 显示 active，25500 正常监听，服务本身没有故障。
+
+### 排查
+
+- `systemctl restart` 只保证进程已拉起，不保证端口已监听。日志显示 subconverter 启动时
+  先读 `base/` 与 `snippets/*.txt`，约 2 秒后才开始监听。
+- 健康检查写的是 `curl --retry 3 --retry-delay 1`。curl 的 `--retry` 只重试超时、5xx 等
+  瞬时错误，**不包含「连接被拒」**（error 7）；需要显式加 `--retry-connrefused`。所以三次
+  重试一次都没发生，第一次失败即退出。
+- 中止还挡住了下一条命令：`nginx -t` 报
+  `mkdir() "/var/cache/nginx/sub-rules" failed (2: No such file or directory)`。
+  `sub-rules-cache.conf` 声明了 `proxy_cache_path`，但全新机器上 `/var/cache/nginx` 都不存在，
+  部署脚本只装配置没建目录。
+
+### 被排除的方向
+
+- 不是 subconverter 二进制或架构问题：`file` 显示 x86-64 静态链接可执行文件，手动启动正常。
+- 不是 `pref.ini` 损坏：日志里的 TOML 解析报错是 subconverter 先按 TOML 试读、失败后回退
+  INI 的正常路径；回退后配置生效（监听 `127.0.0.1:25500`）。
+- 不是端口冲突：`ss -lntp` 只有 subconverter 自己监听 25500。
+
+### 根因
+
+部署脚本的两处前置条件缺口：健康检查没有覆盖「连接被拒」，缓存目录只写配置、没建目录。
+
+### 解决方案
+
+- 健康检查改为 `--retry 15 --retry-delay 1 --retry-connrefused`，失败信息带上
+  `journalctl -u subconverter -n 50` 的排查入口。
+- 在 `nginx -t` 前补建目录：父目录 `/var/cache/nginx` 缺失时以 0755 创建，
+  `/var/cache/nginx/sub-rules` 属主 `www-data`、权限 0700，与 `nginx.conf` 的 `user` 一致。
+- 手工部署步骤同步补上建目录。
+
+### 验证
+
+重启 subconverter 后立即执行新的健康检查：前两次 connection refused，第三次成功，耗时约
+2.2 秒；建目录后 `nginx -t` 通过，Nginx reload 正常。
+
+---
+
 ## 2026-10-18 2096 收口后 Clash 分支报「本地转换失败」
 
 ### 现象
