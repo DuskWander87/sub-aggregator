@@ -50,7 +50,8 @@ git push -> sub-rules-sync.timer（每分钟）-> /var/lib/sub-rules/
   -> Nginx :8443 直接 serve -> Mihomo rule-provider
 ```
 
-见 [design.md](design.md) §9 和 [operations.md](operations.md) §2。
+架构见 [design.md](design.md) §9，自维护规则为什么走本机发布见 §9.4；日常更新步骤见
+[operations.md](operations.md) §2。
 
 ## 3. 速查
 
