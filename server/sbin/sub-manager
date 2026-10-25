@@ -226,24 +226,62 @@ xui_query() {
         "file:${XUI_DB}?mode=ro" "$1"
 }
 
+# 客户端存放在哪张表随 3x-ui 大版本变化：v3 拆成 clients / client_inbounds，
+# 2.x 仍把客户端数组塞在每个入站的 settings JSON 里。查 sqlite_master 判断，
+# 两种面板都能读。
+xui_client_schema() {
+    local count
+    count=$(xui_query "select count(*) from sqlite_master where type = 'table' and name = 'clients';") \
+        || return 1
+    [[ -n "$count" ]] || return 1
+    if [[ "$count" -gt 0 ]]; then
+        printf 'v3\n'
+    else
+        printf 'v2\n'
+    fi
+}
+
 # 把「subId <TAB> 显示名 <TAB> enable」写进 $1，成功返回 0。
 # 显示名取面板的备注（comment），为空时回落到 email——3x-ui 的 email 只是标签，
 # 不参与任何认证，不是凭据。备注里的 TAB 和换行会破坏 TSV，查询里先替换掉。
-# 一个客户端可以挂在多个入站上，group by 去重。
+# 同一个 subId 可能出现在多个入站上，按 subId 去重，与 3x-ui 订阅服务按 subId
+# 聚合客户端的行为一致。
 #
 # 查询失败**和一行都读不到**都返回非零。「x-ui 里一个客户端都没有」不是正常
 # 状态，把它当成空列表会让一次坏读表现为「无漂移」「无需新增」——恰好是那个
 # 看着安心的错误方向。
 xui_clients_into() {
-    local out=$1
-    xui_query "select c.sub_id,
-                      replace(replace(coalesce(nullif(c.comment, ''), c.email), char(9), ' '), char(10), ' '),
-                      c.enable
-                 from clients c
-                 join client_inbounds ci on ci.client_id = c.id
-                where c.sub_id is not null and c.sub_id <> ''
-                group by c.id
-                order by c.id;" >"$out" 2>"$out.err" || return 1
+    local out=$1 schema
+    schema=$(xui_client_schema) || return 1
+    case "$schema" in
+        v3)
+            xui_query "select c.sub_id,
+                              replace(replace(coalesce(nullif(c.comment, ''), c.email), char(9), ' '), char(10), ' '),
+                              c.enable
+                         from clients c
+                         join client_inbounds ci on ci.client_id = c.id
+                        where c.sub_id is not null and c.sub_id <> ''
+                        group by c.id
+                        order by c.id;" >"$out" 2>"$out.err" || return 1
+            ;;
+        v2)
+            # json_valid 先兜住损坏的 settings：json_each 在 WHERE 之前求值，
+            # 直接把无效 JSON 传进去会报 malformed JSON。
+            xui_query "select json_extract(je.value, '$.subId'),
+                              replace(replace(coalesce(nullif(json_extract(je.value, '$.comment'), ''),
+                                                       json_extract(je.value, '$.email')),
+                                              char(9), ' '), char(10), ' '),
+                              json_extract(je.value, '$.enable')
+                         from inbounds i,
+                              json_each(case when json_valid(i.settings) then i.settings
+                                             else '{}' end, '$.clients') je
+                        where json_extract(je.value, '$.subId') is not null
+                          and json_extract(je.value, '$.subId') <> ''
+                        group by json_extract(je.value, '$.subId')
+                        order by min(i.id);" >"$out" 2>"$out.err" || return 1
+            ;;
+        *) return 1 ;;
+    esac
     [[ -s "$out" ]] || return 1
     return 0
 }

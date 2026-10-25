@@ -6,7 +6,9 @@
 ## 1. 前提
 
 - Ubuntu 24.04，具有 root 权限。
-- 3x-ui 已运行，443 上有一个可用的 VLESS Reality 入站。
+- 3x-ui 已运行，443 上有一个可用的 VLESS Reality 入站。2.x 与 v3 都支持：前者把客户端
+  存在入站的 `settings` JSON 里，后者拆成 `clients` / `client_inbounds` 两张表，脚本按表
+  结构自动选择查询。
 - 域名已经指向这台服务器（签发证书需要公网 80 端口可达）。
 - 依赖命令：`curl`、`jq`、`sqlite3`、`openssl`、`flock`、Nginx、systemd 等（`--with-rules` 时
   还有 `git`）。脚本一次性检查，缺失时列出命令和对应 apt 包并询问是否安装（交互式下放在订阅
@@ -49,12 +51,11 @@ tools/deploy.sh --dry-run \
 tools/deploy.sh --domain sub.example.com --profile-name DuskWander
 ```
 
-默认每一步都会停下来确认。全参数加 `--yes` 可跳过确认；再配 `< /dev/null` 让脚本跳过创建
-订阅，适合无人值守执行：
+默认每一步都会停下来确认。全参数加 `--yes` 可跳过确认，适合无人值守执行：
 
 ```bash
 tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
-  --with-rules --yes < /dev/null
+  --with-rules --yes
 ```
 
 确认部署配置后，脚本会：
@@ -68,12 +69,12 @@ tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
 5. 重启 subconverter，校验并启动/重载 Nginx。
 6. 缺少证书时安装 acme.sh、用 webroot 签发到 `/root/cert/<域名>/`；已有 acme.sh 配置是
    standalone 时改成 webroot，并确保续期后 reload Nginx（见 §2.4）。
-7. 询问是否创建第一条订阅。创建后自动跑 `sub-manager test`。
-8. 如果加了 `--with-rules`，默认使用作者的规则集，工作副本不存在时自动克隆，然后启用同步
+7. 如果加了 `--with-rules`，默认使用作者的规则集，工作副本不存在时自动克隆，然后启用同步
    定时器并跑一次 `sub-rules-check`。
+8. 打印 3x-ui 面板地址和建订阅的后续步骤。
 
-非交互执行（`< /dev/null`）会跳过第 7 步，之后手工运行 `sub-manager add --from-xui` 和
-`sub-manager test`。
+部署不创建订阅。订阅的前提是面板里已经有节点和客户端，这一步只能在面板里完成；脚本只
+把入口和命令打印出来，不打断安装，也不向 3x-ui 写入任何东西。
 
 脚本不会修改 3x-ui、Xray 或 443 入站，也不会改动你的仓库工作副本。2096 收口需要手工执行，
 见 §3.5。
@@ -204,6 +205,15 @@ chmod 600 /root/cert/sub.example.com/privkey.pem
 替换表里也已经列出。
 
 ### 3.3 建第一条订阅
+
+部署脚本最后会打印面板地址，形如 `https://sub.example.com:<面板端口>/<面板路径>/`。先在
+面板里准备节点：
+
+1. 登录面板，确认 443 上有一个可用的 VLESS Reality 入站（没有则新建）。
+2. 在入站的客户端列表里添加客户端。客户端备注会显示在订阅里；可以加多个，一个客户端
+   对应一条聚合订阅。
+
+回到服务器创建聚合订阅：
 
 ```bash
 curl -fsS http://127.0.0.1:25500/version

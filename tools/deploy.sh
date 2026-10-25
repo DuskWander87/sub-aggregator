@@ -380,6 +380,34 @@ xui_query() {
         "file:${XUI_DB}?mode=ro" "$1"
 }
 
+# 读 settings 表的单个键。键不存在时 sqlite3 返回空串且退出码为 0，与查询失败
+# 区分开：失败返回非零，由调用方决定回落到默认值还是放弃打印。
+xui_setting() {
+    local value
+    value=$(xui_query "select value from settings where key = '$1';" 2>/dev/null) || return 1
+    printf '%s\n' "$value"
+}
+
+# 3x-ui 面板地址。端口和路径只有被面板改过才落进 settings 表，查不到即面板默认值。
+# 主机名优先取面板证书的 SAN；证书不是单域名时回落到订阅域名。
+xui_panel_url() {
+    local port path cert key host="" scheme=http
+    port=$(xui_setting webPort) || return 1
+    path=$(xui_setting webBasePath) || return 1
+    cert=$(xui_setting webCertFile) || return 1
+    key=$(xui_setting webKeyFile) || return 1
+    [[ -n $port ]] || port=2053
+    [[ -n $path ]] || path=/
+    [[ $path == /* ]] || path="/$path"
+    [[ $path == */ ]] || path="$path/"
+    if [[ -n $cert && -n $key ]]; then
+        scheme=https
+        host=$(cert_domain "$cert" 2>/dev/null) || host=""
+    fi
+    [[ -n $host ]] || host=$DOMAIN
+    printf '%s://%s:%s%s\n' "$scheme" "$host" "$port" "$path"
+}
+
 # 命令 → apt 包。只安装缺失命令对应的包；未列出的命令视为基础系统自带，缺失时直接报错，
 # 不盲目装包。
 command_package() {
@@ -888,10 +916,14 @@ install_files() {
     systemctl enable subconverter
     systemctl restart subconverter
     # restart 返回时进程可能还没开始监听：subconverter 要先读完 base/ 与 snippets/。
-    # 普通 --retry 不重试「连接被拒」，必须加 --retry-connrefused。
-    curl -fsS --max-time 10 --retry 15 --retry-delay 1 --retry-connrefused \
-        http://127.0.0.1:25500/version >/dev/null \
-        || fail "subconverter 未在 127.0.0.1:25500 响应。查看 journalctl -u subconverter -n 50。"
+    # 普通 --retry 不重试「连接被拒」，必须加 --retry-connrefused。重试期间 curl
+    # 每失败一次就往 stderr 打一行，看起来像部署出错；先存起来，只在最终失败时回放。
+    log "等待 subconverter 监听 127.0.0.1:25500"
+    if ! curl -fsS --max-time 10 --retry 15 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:25500/version >/dev/null 2>"$WORK_DIR/subconverter-curl.err"; then
+        cat "$WORK_DIR/subconverter-curl.err" >&2
+        fail "subconverter 未在 127.0.0.1:25500 响应。查看 journalctl -u subconverter -n 50。"
+    fi
 
     # proxy_cache_path 不会自己建目录，父目录缺失时 nginx -t 的 mkdir() 会失败。
     # 缓存目录属主与 nginx.conf 的 user 一致，规则缓存才能写入。
@@ -915,15 +947,33 @@ install_files() {
     fi
 }
 
-add_subscription() {
-    if [[ ! -t 0 ]]; then
-        warn "当前不是交互式终端，跳过创建订阅。"
-        printf '请手工运行：%s add --from-xui\n' "$SBIN_DIR/sub-manager" >&2
-        return 0
+# 部署只安装聚合层，不碰 3x-ui，也不替用户创建订阅：订阅的前提是面板里已经有
+# 节点和客户端，而这只能在面板里完成。把面板入口和后续命令一次打印出来。
+print_next_steps() {
+    local panel_url=""
+    panel_url=$(xui_panel_url 2>/dev/null) || panel_url=""
+
+    log ""
+    log "完成。备份在 $BACKUP_DIR。"
+    log "回滚：$REPO_ROOT/tools/deploy.sh --rollback $BACKUP_DIR"
+    log ""
+    log "下一步：在 3x-ui 面板里创建节点和客户端"
+    log ""
+    if [[ -n $panel_url ]]; then
+        log "  面板地址：$panel_url"
+    else
+        log "  面板地址：读取面板设置失败，请从面板配置中确认端口和路径。"
     fi
-    confirm "现在创建第一条订阅？" || { log "已跳过。"; return 0; }
-    "$SBIN_DIR/sub-manager" add --from-xui
-    "$SBIN_DIR/sub-manager" test
+    cat <<EOF
+
+  1. 登录面板，确认 443 上有一个可用的 VLESS Reality 入站（没有则新建）。
+  2. 在入站的客户端列表里添加客户端；备注会显示在订阅里。
+  3. 回到服务器创建聚合订阅：
+
+       $SBIN_DIR/sub-manager add --from-xui
+       $SBIN_DIR/sub-manager test
+
+EOF
 }
 
 setup_rules() {
@@ -1034,12 +1084,8 @@ main() {
     do_backup
     stage
     install_files
-    add_subscription
     setup_rules
-
-    log ""
-    log "完成。备份在 $BACKUP_DIR。"
-    log "回滚：$REPO_ROOT/tools/deploy.sh --rollback $BACKUP_DIR"
+    print_next_steps
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

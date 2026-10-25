@@ -8,6 +8,68 @@
 
 ---
 
+## 2026-10-25 首次部署在创建第一条订阅处中止
+
+### 现象
+
+`tools/deploy.sh` 安装完成后询问「现在创建第一条订阅？」，回答 `y` 后立即退出：
+
+```text
+现在创建第一条订阅？ [y/n] y
+错误：读取 3x-ui 客户端列表失败（Error: in prepare, no such table: clients），未做修改。
+
+错误：部署中断（退出码 1）。
+```
+
+此时 subconverter、Nginx、证书都已经装好；脚本以 `set -e` 运行，后面的 `setup_rules`
+也没机会执行。
+
+### 排查
+
+- `sub-manager add --from-xui` 的查询是
+  `from clients c join client_inbounds ci on ci.client_id = c.id`，这是 3x-ui v3 的
+  规范化表结构。
+- 查本机数据库：`sqlite3 /etc/x-ui/x-ui.db '.tables'` 只有 `inbounds`、`settings`、
+  `users`、`client_traffics` 等表，没有 `clients`。本机 3x-ui 是 2.8.11，客户端以 JSON
+  数组存在 `inbounds.settings` 的 `clients` 字段里，`subId` 用驼峰命名。
+- 3x-ui v3 的 `internal/database/model/model.go` 才把客户端拆成 `clients` 与
+  `client_inbounds` 两张表。脚本读的是 v3 的表，装的是 2.x 的库。
+
+### 被排除的方向
+
+- 不是数据库被写事务锁住。错误是 `no such table`，不是 `database is locked`；
+  `.timeout 3000` 的重试窗口没有参与。
+- 不是 x-ui 没运行或 DB 不可读。`x-ui.service` active，`sqlite3 -readonly` 能正常查询
+  `inbounds` 与 `settings`。
+- 不是客户端不存在。`inbounds.settings` 的 `clients` 数组里有一个启用中的客户端，带
+  `subId`；缺的是查询接口，不是数据。
+
+### 根因
+
+`sub-manager` 把 3x-ui v3 的表结构当成唯一形态；部署脚本又把「创建第一条订阅」当成
+安装的必经步骤，失败时用 `set -e` 中止整个部署。订阅是可选的后置操作，不应拖垮已经
+成功的安装。
+
+### 解决方案
+
+- `xui_clients_into` 先查 `sqlite_master` 判断有没有 `clients` 表：有则走 v3 查询，没有
+  则用 `json_each` 从 `inbounds.settings` 的 `clients` 数组里取 `subId` / `comment` /
+  `email` / `enable`。两种查询输出同一种 TSV，`list` 与 `add --from-xui` 不用改。
+- `deploy.sh` 不再询问、不再调用 `sub-manager add`。安装完成后打印面板地址（端口与路径
+  取自 `webPort` / `webBasePath`，协议看 `webCertFile` / `webKeyFile`），并列出「登录面板
+  建入站 → 加客户端 → `sub-manager add --from-xui` → `sub-manager test`」。
+- subconverter 健康检查的重试日志不再逐行打到终端：curl 的 stderr 先写进临时文件，只在
+  最终失败时回放。
+
+### 验证
+
+- 在本机 2.8.11 的库上执行新查询，返回唯一的启用客户端，`subId` 与备注列对齐。
+- `bash -n` 校验 `sub-manager` 与 `deploy.sh`；`deploy.sh --dry-run` 正常打印计划并退出 0。
+- 重跑 `deploy.sh --yes` 完整通过，收尾打印面板地址和后续命令，不再访问 3x-ui 客户端表。
+- `sub-manager add --from-xui` 在 2.8.11 的库上列出候选客户端；直接回车取消，状态未改。
+
+---
+
 ## 2026-10-25 首次部署在 subconverter 健康检查处中止
 
 ### 现象
@@ -57,6 +119,9 @@ curl: (7) Failed to connect to 127.0.0.1 port 25500 after 0 ms: Couldn't connect
 
 重启 subconverter 后立即执行新的健康检查：前两次 connection refused，第三次成功，耗时约
 2.2 秒；建目录后 `nginx -t` 通过，Nginx reload 正常。
+
+> 后续：重试成功时那几行 connection refused 仍会出现在终端里，看起来像部署出错。现在
+> 只在最终失败时回放，见上方 `2026-10-25 首次部署在创建第一条订阅处中止`。
 
 ---
 
