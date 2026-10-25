@@ -7,6 +7,18 @@
 set -Eeuo pipefail
 umask 077
 
+# 警告与错误着色。只在 stderr 是终端时启用，重定向到文件或管道时保持纯文本；
+# NO_COLOR 可显式关闭。
+if [[ -t 2 && -z ${NO_COLOR:-} && ${TERM:-} != dumb ]]; then
+    readonly COLOR_WARN=$'\033[33m'
+    readonly COLOR_ERROR=$'\033[31m'
+    readonly COLOR_RESET=$'\033[0m'
+else
+    readonly COLOR_WARN=""
+    readonly COLOR_ERROR=""
+    readonly COLOR_RESET=""
+fi
+
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 readonly PROGRAM="${0##*/}"
@@ -42,6 +54,7 @@ ACME_EMAIL=""
 WITH_RULES=0
 DRY_RUN=0
 ASSUME_YES=0
+INSTALL_DEPS_ONLY=0
 ISSUE_CERT=1
 CERT_NEEDS_ISSUE=0
 ROLLBACK_DIR=""
@@ -65,6 +78,7 @@ usage() {
   --rules-workdir <目录>    规则仓库本机工作副本，默认 /root/code/shadowrocket-config
   --with-rules              启用规则同步定时器；默认使用作者的规则集
   --dry-run                 只打印计划，不做修改
+  --install-deps            只安装缺失的依赖命令，然后退出
   --yes, -y                 跳过逐步确认；依赖缺失时直接安装
   --rollback <备份目录>     从备份目录恢复
   -h, --help                显示这份帮助
@@ -73,8 +87,8 @@ usage() {
 EOF
 }
 
-fail() { printf '错误：%s\n' "$*" >&2; exit 1; }
-warn() { printf '警告：%s\n' "$*" >&2; }
+fail() { printf '%s✗ 错误：%s%s\n' "$COLOR_ERROR" "$*" "$COLOR_RESET" >&2; exit 1; }
+warn() { printf '%s⚠ 警告：%s%s\n' "$COLOR_WARN" "$*" "$COLOR_RESET" >&2; }
 log() { printf '%s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -109,6 +123,7 @@ parse_args() {
             --rules-workdir) opt_value "$@"; RULES_WORKDIR=$2; shift 2 ;;
             --with-rules) WITH_RULES=1; shift ;;
             --dry-run) DRY_RUN=1; shift ;;
+            --install-deps) INSTALL_DEPS_ONLY=1; shift ;;
             --yes|-y) ASSUME_YES=1; shift ;;
             --rollback) opt_value "$@"; ROLLBACK_DIR=$2; shift 2 ;;
             -h|--help) usage; exit 0 ;;
@@ -126,7 +141,8 @@ prompt_value() {
         return 0
     fi
     if [[ -n $default ]]; then
-        printf '%s [%s]: ' "$label" "$default" >&2
+        # 把「回车会发生什么」写清楚，而不是只把默认值放在方括号里。
+        printf '%s（回车使用默认值 %s）: ' "$label" "$default" >&2
     else
         printf '%s: ' "$label" >&2
     fi
@@ -325,7 +341,11 @@ prompt_acme_email() {
 
 prompt_values() {
     prompt_value DOMAIN "订阅域名" ""
-    prompt_value PROFILE_NAME "订阅显示名（纯 ASCII）" "DuskWander87"
+    prompt_value PROFILE_NAME "订阅显示名，纯 ASCII" "DuskWander87"
+}
+
+fill_defaults() {
+    # openssl 可能刚由 ensure_dependencies 装上，所以放在依赖处理之后。
     [[ -n $RULES_PREFIX ]] || RULES_PREFIX=$(openssl rand -hex 12)
     [[ -n $RULES_REPO ]] || RULES_REPO=$DEFAULT_RULES_REPO
 }
@@ -420,18 +440,18 @@ ensure_dependencies() {
     local cmd_list="${MISSING_COMMANDS[*]}"
     local pkg_list="${MISSING_PACKAGES[*]}"
 
+    warn "缺少依赖命令：$cmd_list（对应包：$pkg_list）"
+
+    # dry-run 只读：只报告，不安装。安装走独立的 --install-deps。
     if [[ $DRY_RUN -eq 1 ]]; then
-        warn "缺少依赖命令：$cmd_list（对应包：$pkg_list）"
-        log "dry-run 不安装依赖；正式执行时会统一提示，确认后自动安装。"
+        printf '    安装：%s --install-deps\n' "${BASH_SOURCE[0]}" >&2
         return 0
     fi
 
-    warn "缺少依赖命令：$cmd_list"
-    log "对应 apt 包：$pkg_list"
     if [[ $ASSUME_YES -eq 0 && ! -t 0 ]]; then
         fail "当前不是交互式终端，无法确认安装。手工执行：apt-get update && apt-get install -y $pkg_list（或加 --yes 自动安装）"
     fi
-    if ! confirm "现在安装？"; then
+    if ! confirm "现在安装依赖？"; then
         fail "未安装依赖。手工执行：apt-get update && apt-get install -y $pkg_list"
     fi
 
@@ -454,14 +474,17 @@ preflight() {
     systemctl is-active --quiet x-ui.service || fail "x-ui.service 未运行。"
 
     # 3x-ui 只做检查，不改面板。443 入站缺失时订阅里的节点不可用，但聚合服务本身仍能装。
+    # sqlite3 缺失时上面已经报过依赖，这里不再重复一条误导性的「读取失败」。
     local inbound443
-    if inbound443=$(xui_query "select count(*) from inbounds where port = 443;" 2>/dev/null) \
-        && [[ -n $inbound443 ]]; then
-        if [[ ! $inbound443 =~ ^[0-9]+$ ]] || ((inbound443 == 0)); then
-            warn "3x-ui 没有监听 443 的入站，订阅里的节点可能不可用。"
+    if have sqlite3; then
+        if inbound443=$(xui_query "select count(*) from inbounds where port = 443;" 2>/dev/null) \
+            && [[ -n $inbound443 ]]; then
+            if [[ ! $inbound443 =~ ^[0-9]+$ ]] || ((inbound443 == 0)); then
+                warn "3x-ui 没有监听 443 的入站，订阅里的节点可能不可用。"
+            fi
+        else
+            warn "读取 3x-ui 入站列表失败（可能写事务阻塞），跳过 443 入站检查。"
         fi
-    else
-        warn "读取 3x-ui 入站列表失败（可能写事务阻塞），跳过 443 入站检查。"
     fi
 
     local sub_listen="" entry bad=0
@@ -524,7 +547,10 @@ preflight() {
             fail "端口 8443 已被其他进程占用。"
         fi
     fi
-    systemctl is-active --quiet nginx.service || warn "nginx.service 未运行，稍后会启动。"
+    # nginx 没装时依赖警告已经覆盖，这里只在已安装但未运行时提示。
+    if have nginx && ! systemctl is-active --quiet nginx.service; then
+        warn "nginx.service 未运行，部署时会启动。"
+    fi
 }
 
 init_targets() {
@@ -914,20 +940,45 @@ main() {
 
     [[ -d "$REPO_ROOT/server" ]] || fail "找不到仓库根目录：$REPO_ROOT"
 
+    if [[ $INSTALL_DEPS_ONLY -eq 1 && $DRY_RUN -eq 1 ]]; then
+        fail "--install-deps 会安装软件包，不能与 --dry-run 同用。"
+    fi
+
     if [[ -n $ROLLBACK_DIR ]]; then
         require_root
         do_rollback
         return 0
     fi
 
-    # 依赖先于提问检查：缺包时一次性列出并询问是否安装，不让用户答完问题才发现装不了。
-    # dry-run 只报告，不改系统。
     require_root
-    ensure_dependencies
+
+    if [[ $INSTALL_DEPS_ONLY -eq 1 ]]; then
+        if collect_missing_dependencies; then
+            ensure_dependencies
+        else
+            log "依赖已就绪。"
+        fi
+        return 0
+    fi
+
+    # 交互式下先问订阅相关的值，再处理依赖，避免安装提示打断提问流程；无人值守时
+    # 依赖必须先装好，否则域名可能无法从 x-ui.db 推导。
+    local defer_deps=0
+    if [[ -t 0 ]]; then
+        defer_deps=1
+    else
+        ensure_dependencies
+    fi
 
     detect_existing_values
     detect_domain
     prompt_values
+
+    if [[ $defer_deps -eq 1 ]]; then
+        ensure_dependencies
+    fi
+    fill_defaults
+
     resolve_cert_dir
     prompt_acme_email
     validate_values

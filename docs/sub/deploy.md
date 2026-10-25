@@ -9,9 +9,10 @@
 - 3x-ui 已运行，443 上有一个可用的 VLESS Reality 入站。
 - 域名已经指向这台服务器（签发证书需要公网 80 端口可达）。
 - 依赖命令：`curl`、`jq`、`sqlite3`、`openssl`、`flock`、Nginx、systemd 等（`--with-rules` 时
-  还有 `git`）。脚本在提问前统一检查，缺失时列出命令和对应 apt 包并询问是否安装，确认后执行
-  `apt-get update` 和 `apt-get install -y` 再继续；拒绝或非交互运行时打印可以直接复制的
-  `apt-get install` 命令后退出。
+  还有 `git`）。脚本一次性检查，缺失时列出命令和对应 apt 包并询问是否安装（交互式下放在订阅
+  域名和显示名提问之后），确认后执行 `apt-get update` 和 `apt-get install -y`；拒绝安装、
+  或正式部署时非交互且没加 `--yes`，打印可以直接复制的命令。只想安装依赖、不开始部署时用
+  `tools/deploy.sh --install-deps`。
 - 至少 2 GB 内存。
 
 域名也不需要手工提供：脚本按已安装的 `sub-manager`、3x-ui 的 `subDomain` / `webDomain`、
@@ -39,8 +40,8 @@ tools/deploy.sh --dry-run \
 
 不带参数时脚本只询问订阅显示名（首次自动签发且没装 acme.sh 时还会问一个可留空的邮箱）；
 域名从 3x-ui 配置或证书推导，证书目录由域名推导，规则前缀、规则仓库都有默认值。dry-run
-只做检查并打印计划，不改任何文件；缺少依赖也只报告，不安装。证书会显示为「复用已有」或
-「acme.sh 签发」。
+只做检查并打印计划，不改任何文件；缺少依赖时只报告，用 `--install-deps` 单独安装。证书会
+显示为「复用已有」或「acme.sh 签发」。
 
 ### 2.2 执行
 
@@ -58,8 +59,8 @@ tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
 
 确认计划后，脚本会：
 
-1. 检查 root 和依赖命令（缺失时先统一提示安装），再检查 x-ui 服务与数据库、443 入站、
-   2096 监听、8443 端口和域名解析。
+1. 检查 root 和依赖命令（交互式下先问订阅域名与显示名；缺失时统一提示安装），再检查
+   x-ui 服务与数据库、443 入站、2096 监听、8443 端口和域名解析。
    3x-ui 只读不写；443 入站或 2096 收口不符合预期时给出警告。
 2. 把 `server/` 复制到临时目录，替换域名、证书目录、显示名、规则前缀和规则仓库。
 3. 把要覆盖的文件备份到 `/root/sub-aggregator-backup-<时间戳>-<pid>/`。
@@ -91,7 +92,8 @@ tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
 | `--rules-workdir <目录>` | 规则仓库的本机 git 工作副本，默认 `/root/code/shadowrocket-config` |
 | `--with-rules` | 启用 `sub-rules-sync.timer`；默认使用作者的规则集 |
 | `--dry-run` | 只打印计划，不做修改 |
-| `--yes` / `-y` | 跳过逐步确认；依赖缺失时直接安装 |
+| `--install-deps` | 只安装缺失的依赖命令，然后退出，不部署 |
+| `--yes` / `-y` | 跳过逐步确认；正式部署时依赖缺失直接安装 |
 | `--rollback <备份目录>` | 从备份目录恢复 |
 
 重装时，脚本会从已安装的 `sub-manager`、`sub-rules.conf` 和 `sub-rules-sync` 里读取域名、
