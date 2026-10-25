@@ -69,8 +69,9 @@ tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
 5. 重启 subconverter，校验并启动/重载 Nginx。
 6. 缺少证书时安装 acme.sh、用 webroot 签发到 `/root/cert/<域名>/`；已有 acme.sh 配置是
    standalone 时改成 webroot，并确保续期后 reload Nginx（见 §2.4）。
-7. 如果加了 `--with-rules`，默认使用作者的规则集，工作副本不存在时自动克隆，然后启用同步
-   定时器并跑一次 `sub-rules-check`。
+7. 如果加了 `--with-rules`，启用本机规则发布：规则仓库默认是作者的，工作副本不存在时
+   自动克隆，然后启用同步定时器并跑一次 `sub-rules-check`。不加时 Clash 分支仍含规则表，
+   两个自维护列表由服务端反代 GitHub 兜底。
 8. 打印 3x-ui 面板地址和建订阅的后续步骤。
 
 部署不创建订阅。订阅的前提是面板里已经有节点和客户端，这一步只能在面板里完成；脚本只
@@ -91,7 +92,7 @@ tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
 | `--rules-prefix <hex>` | 规则端点前缀，默认随机生成 24 位 hex |
 | `--rules-repo <owner/repo>` | 规则仓库，默认 `DuskWander87/shadowrocket-config`；自定义时传 fork 的 owner/repo |
 | `--rules-workdir <目录>` | 规则仓库的本机 git 工作副本，默认 `/root/code/shadowrocket-config` |
-| `--with-rules` | 启用 `sub-rules-sync.timer`；默认使用作者的规则集 |
+| `--with-rules` | 启用本机规则发布（克隆规则仓库并启动 `sub-rules-sync.timer`）；仓库默认是作者的 |
 | `--dry-run` | 只打印计划，不做修改 |
 | `--install-deps` | 只安装缺失的依赖命令，然后退出，不部署 |
 | `--yes` / `-y` | 跳过逐步确认；正式部署时依赖缺失直接安装 |
@@ -225,10 +226,15 @@ sub-manager test
 配置并完成端到端验证。如果 3x-ui 的订阅服务不在同一个域名下，改用 `sub-manager add` 手工
 粘贴原始订阅。
 
-### 3.4 可选：规则链
+### 3.4 可选：本机发布规则
 
-规则集使用作者维护的 [DuskWander87/shadowrocket-config](https://github.com/DuskWander87/shadowrocket-config)，
-`rules/` 下有 `ChinaDirect.list` 和 `Reject.list` 两个列表。规则内容可以直接在仓库里看到。
+Clash 分支的订阅始终包含规则表。作者维护的
+[DuskWander87/shadowrocket-config](https://github.com/DuskWander87/shadowrocket-config)
+提供 `ChinaDirect.list` 和 `Reject.list` 两个自维护列表，规则内容可以直接在仓库里看到。
+这两条 URL 指向本站 `8443`；没有本地发布目录时，服务端反代 GitHub 兜底提供，客户端仍然
+只连本站。本节启用的是本地副本，不是「是否使用规则表」：本地发布能让更新延迟确定
+（≤1 分钟），并在 GitHub 不可达时继续提供端点。为什么需要这一层，见
+[design.md](design.md) §9.4。
 
 手动部署时，把仓库克隆到默认工作副本路径，然后启用定时器：
 
@@ -236,10 +242,12 @@ sub-manager test
 git clone https://github.com/DuskWander87/shadowrocket-config.git /root/code/shadowrocket-config
 install -d -m 0755 /var/lib/sub-rules
 systemctl enable --now sub-rules-sync.timer
+sub-rules-sync -v
 sub-rules-check
 ```
 
-用部署脚本时，加 `--with-rules` 即可。脚本默认使用作者的规则集，工作副本不存在时会自动克隆：
+用部署脚本时，加 `--with-rules` 启用本机发布。规则仓库默认就是作者的，工作副本不存在时
+会自动克隆：
 
 ```bash
 tools/deploy.sh --with-rules
@@ -314,7 +322,7 @@ acme.sh --list                                    # 用 acme.sh 签发时：证�
 openssl x509 -in /root/cert/sub.example.com/fullchain.pem -noout -enddate
 ```
 
-规则链启用后再跑：
+启用本机规则发布后再跑：
 
 ```bash
 sub-rules-check

@@ -76,7 +76,7 @@ usage() {
   --rules-prefix <hex>      规则端点前缀，默认随机生成 24 位 hex
   --rules-repo <owner/repo> 规则仓库，默认 DuskWander87/shadowrocket-config
   --rules-workdir <目录>    规则仓库本机工作副本，默认 /root/code/shadowrocket-config
-  --with-rules              启用规则同步定时器；默认使用作者的规则集
+  --with-rules              启用本机规则发布；规则仓库默认是作者的
   --dry-run                 只打印计划，不做修改
   --install-deps            只安装缺失的依赖命令，然后退出
   --yes, -y                 跳过逐步确认；依赖缺失时直接安装
@@ -653,8 +653,8 @@ print_plan() {
   备份目录:
     $BACKUP_DIR
 
-  规则链:
-    $(if [[ $WITH_RULES -eq 1 ]]; then echo "启用 sub-rules-sync.timer（工作副本不存在时自动克隆 $RULES_REPO）"; else echo "不启用（需要时加 --with-rules）"; fi)
+  规则发布:
+    $(if [[ $WITH_RULES -eq 1 ]]; then echo "启用 sub-rules-sync.timer（工作副本不存在时自动克隆 $RULES_REPO）"; else echo "本次不启用（Clash 分支仍含规则表，自维护列表由服务端反代 GitHub 兜底）"; fi)
 EOF
 }
 
@@ -668,9 +668,9 @@ print_summary() {
         cert_state="复用 $CERT_DIR"
     fi
     if [[ $WITH_RULES -eq 1 ]]; then
-        rules_state="启用 sub-rules-sync.timer"
+        rules_state="启用 sub-rules-sync.timer（本机发布）"
     else
-        rules_state="不启用（需要时加 --with-rules）"
+        rules_state="本次不启用（Clash 分支仍含规则表，服务端反代 GitHub 兜底）"
     fi
     cat <<EOF
 部署配置
@@ -681,7 +681,7 @@ print_summary() {
   规则端点前缀:   $RULES_PREFIX
   规则仓库:       $RULES_REPO
   规则工作副本:   $RULES_WORKDIR
-  规则链:         $rules_state
+  规则发布:       $rules_state
   备份目录:       $BACKUP_DIR
 EOF
 }
@@ -998,7 +998,7 @@ setup_rules() {
     "$SBIN_DIR/sub-rules-sync" -v \
         || warn "首次规则同步失败，检查 $RULES_WORKDIR 和网络。"
     "$SBIN_DIR/sub-rules-check" \
-        || warn "规则链路检查未通过；确认已经至少创建一条订阅。"
+        || warn "规则发布检查未通过；确认已经至少创建一条订阅。"
 }
 
 do_rollback() {
