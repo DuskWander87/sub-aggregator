@@ -32,6 +32,8 @@ readonly ACME_NGINX_CONF="$NGINX_CONF_D_DIR/acme-challenge.conf"
 readonly APT_PACKAGES="curl jq sqlite3 openssl util-linux nginx tar iproute2 libc-bin gawk"
 
 DOMAIN=""
+DOMAIN_CANDIDATE=""
+DOMAIN_SOURCE=""
 CERT_DIR=""
 PROFILE_NAME=""
 RULES_PREFIX=""
@@ -54,7 +56,7 @@ usage() {
   deploy.sh [选项]
 
 选项：
-  --domain <域名>           订阅域名
+  --domain <域名>           订阅域名；省略时从 3x-ui 配置或证书自动推导
   --cert-dir <目录>         证书目录；默认自动查找，缺失时签发到 /root/cert/<域名>
   --acme-email <邮箱>       首次安装 acme.sh 时注册账户用，可留空
   --no-issue-cert           缺少证书时不自动签发，直接报错
@@ -159,6 +161,95 @@ detect_existing_values() {
     if [[ -r "$SBIN_DIR/sub-rules-sync" && $RULES_WORKDIR == "$DEFAULT_RULES_WORKDIR" ]]; then
         RULES_WORKDIR=$(sed -n 's/^REPO_DIR=\(.*\)$/\1/p' \
             "$SBIN_DIR/sub-rules-sync" | head -n 1)
+    fi
+}
+
+is_domain() {
+    local value=$1
+    [[ $value =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
+    [[ $value == *.* ]] || return 1
+    [[ ! $value =~ ^[0-9.]+$ ]] || return 1
+    return 0
+}
+
+# 从证书的 SAN 取域名；只有一个可用的 DNS 名时才返回，通配符和 IP 跳过。
+cert_domain() {
+    local cert=$1 names name count=0 result=""
+    [[ -r $cert ]] || return 1
+    names=$(openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null \
+        | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS:[[:space:]]*\(.*\)$/\1/p')
+    if [[ -z $names ]]; then
+        names=$(openssl x509 -in "$cert" -noout -subject 2>/dev/null \
+            | sed -n 's/.*CN[[:space:]]*=[[:space:]]*\([^,/]*\).*/\1/p')
+    fi
+    while IFS= read -r name; do
+        name=${name//[[:space:]]/}
+        is_domain "$name" || continue
+        count=$((count + 1))
+        result=$name
+    done <<<"$names"
+    (( count == 1 )) || return 1
+    printf '%s\n' "$result"
+}
+
+# 3x-ui 自己记录的域名。不能用入站的 Reality SNI：那是目标站域名，不是订阅域名。
+detect_domain_from_xui() {
+    command -v sqlite3 >/dev/null 2>&1 || return 1
+    [[ -r $XUI_DB ]] || return 1
+    systemctl is-active --quiet x-ui.service 2>/dev/null || return 1
+
+    local key value cert
+    for key in subDomain webDomain; do
+        value=$(xui_query "select value from settings where key = '$key';" 2>/dev/null) || continue
+        value=${value#http://}
+        value=${value#https://}
+        value=${value%%/*}
+        if [[ $value =~ ^([^:]+):[0-9]+$ ]]; then
+            value=${BASH_REMATCH[1]}
+        fi
+        is_domain "$value" || continue
+        DOMAIN_CANDIDATE=$value
+        DOMAIN_SOURCE="3x-ui $key"
+        return 0
+    done
+    for key in subCertFile webCertFile; do
+        cert=$(xui_query "select value from settings where key = '$key';" 2>/dev/null) || continue
+        [[ -r $cert ]] || continue
+        value=$(cert_domain "$cert") || continue
+        DOMAIN_CANDIDATE=$value
+        DOMAIN_SOURCE="3x-ui $key 的证书"
+        return 0
+    done
+    return 1
+}
+
+# 兜底：/root/cert 下只有一个域名证书时直接用它。
+detect_domain_from_certs() {
+    local file dir value found=""
+    for file in "$DEFAULT_CERT_ROOT"/*/fullchain.pem; do
+        [[ -r $file ]] || continue
+        dir=$(basename -- "$(dirname -- "$file")")
+        if is_domain "$dir"; then
+            value=$dir
+        else
+            value=$(cert_domain "$file") || continue
+        fi
+        [[ -z $found ]] || return 1
+        found=$value
+    done
+    [[ -n $found ]] || return 1
+    DOMAIN_CANDIDATE=$found
+    DOMAIN_SOURCE="$DEFAULT_CERT_ROOT 下唯一的证书"
+    return 0
+}
+
+detect_domain() {
+    [[ -n $DOMAIN ]] && return 0
+    DOMAIN_CANDIDATE=""
+    DOMAIN_SOURCE=""
+    if detect_domain_from_xui || detect_domain_from_certs; then
+        DOMAIN=$DOMAIN_CANDIDATE
+        log "域名：从 $DOMAIN_SOURCE 推导为 $DOMAIN"
     fi
 }
 
@@ -753,6 +844,7 @@ main() {
     fi
 
     detect_existing_values
+    detect_domain
     prompt_values
     resolve_cert_dir
     prompt_acme_email

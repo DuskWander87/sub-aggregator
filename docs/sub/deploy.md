@@ -12,6 +12,10 @@
   缺少时脚本会打印一条可以直接复制的 `apt-get install` 命令后退出。
 - 至少 2 GB 内存。
 
+域名也不需要手工提供：脚本按已安装的 `sub-manager`、3x-ui 的 `subDomain` / `webDomain`、
+3x-ui 记录的面板/订阅证书、`/root/cert` 下唯一的证书依次推导，都找不到时才询问。3x-ui 入站的
+Reality SNI 是目标站域名，不会被采用；推导结果不对时用 `--domain` 覆盖。
+
 证书不需要预先准备：脚本按 `/root/cert/<域名>/`、`/etc/letsencrypt/live/<域名>/`、
 acme.sh 的安装记录依次查找；都没有时用 acme.sh 通过 Nginx webroot 自动签发到
 `/root/cert/<域名>/`。想用自己的证书时把 `fullchain.pem` 和 `privkey.pem` 放进该目录；
@@ -31,9 +35,9 @@ tools/deploy.sh --dry-run \
   --profile-name DuskWander
 ```
 
-不带参数时脚本询问域名和订阅显示名（首次自动签发且没装 acme.sh 时还会问一个可留空的邮箱）；
-证书目录由域名推导，规则前缀、规则仓库都有默认值。dry-run 只做检查并打印计划，不改任何
-文件。证书会显示为「复用已有」或「acme.sh 签发」。
+不带参数时脚本只询问订阅显示名（首次自动签发且没装 acme.sh 时还会问一个可留空的邮箱）；
+域名从 3x-ui 配置或证书推导，证书目录由域名推导，规则前缀、规则仓库都有默认值。dry-run
+只做检查并打印计划，不改任何文件。证书会显示为「复用已有」或「acme.sh 签发」。
 
 ### 2.2 执行
 
@@ -73,7 +77,7 @@ tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
 
 | 参数 | 含义 |
 |---|---|
-| `--domain <域名>` | 订阅域名 |
+| `--domain <域名>` | 订阅域名；省略时从 3x-ui 配置或证书推导 |
 | `--cert-dir <目录>` | 证书目录；默认自动查找，缺失时签发到 `/root/cert/<域名>` |
 | `--acme-email <邮箱>` | 首次安装 acme.sh 时注册账户用，可留空 |
 | `--no-issue-cert` | 缺少证书时不自动签发，直接报错 |
@@ -307,6 +311,8 @@ sub-rules-check
 - **续期失败**：`acme.sh --list` 看下次续期时间；确认 `/etc/nginx/conf.d/acme-challenge.conf`
   生效（`nginx -T | grep -A5 acme-challenge`），且 Nginx worker 能读 `/var/www/acme`。原来由
   3x-ui 用 standalone 签发的证书，重跑部署脚本会自动改成 webroot。
+- **域名推导不对**：3x-ui 里配了多个证书或面板/订阅用了不同域名时，推导会停在第一个匹配项
+  或退回询问。直接加 `--domain` 明确指定，不要依赖推导。
 - **`add --from-xui` 读不到数据库**：确认 `x-ui.service` 在运行、`sqlite3` 已安装、
   `/etc/x-ui/x-ui.db` 可读。
 - **`sub-manager test` 失败**：先看是原始订阅拉取失败还是 Clash 转换失败。域名、证书、
