@@ -7,9 +7,15 @@
 
 - Ubuntu 24.04，具有 root 权限。
 - 3x-ui 已运行，443 上有一个可用的 VLESS Reality 入站。
-- 域名已经指向这台服务器，证书目录里有 `fullchain.pem` 和 `privkey.pem`。
+- 域名已经指向这台服务器（签发证书需要公网 80 端口可达）。
 - 已安装 `curl`、`jq`、`sqlite3`、`openssl`、`flock`、`git`、Nginx 和 systemd。
+  缺少时脚本会打印一条可以直接复制的 `apt-get install` 命令后退出。
 - 至少 2 GB 内存。
+
+证书不需要预先准备：脚本按 `/root/cert/<域名>/`、`/etc/letsencrypt/live/<域名>/`、
+acme.sh 的安装记录依次查找；都没有时用 acme.sh 通过 Nginx webroot 自动签发到
+`/root/cert/<域名>/`。想用自己的证书时把 `fullchain.pem` 和 `privkey.pem` 放进该目录；
+文件不全且希望直接报错、而不是自动签发时加 `--no-issue-cert`。
 
 还没有 3x-ui 底座，可以先看 [自建节点教程 3XUI 面板（无限芝士）](https://www.youtube.com/watch?v=TRVE7sVTgWw)。
 
@@ -22,45 +28,42 @@
 ```bash
 tools/deploy.sh --dry-run \
   --domain sub.example.com \
-  --cert-dir /root/cert/sub.example.com \
   --profile-name DuskWander
 ```
 
-不带参数时脚本会逐项询问域名、证书目录和订阅显示名；参数传齐则不提问。dry-run 只做检查并
-打印计划，不改任何文件。
+不带参数时脚本询问域名和订阅显示名（首次自动签发且没装 acme.sh 时还会问一个可留空的邮箱）；
+证书目录由域名推导，规则前缀、规则仓库都有默认值。dry-run 只做检查并打印计划，不改任何
+文件。证书会显示为「复用已有」或「acme.sh 签发」。
 
 ### 2.2 执行
 
 ```bash
-tools/deploy.sh \
-  --domain sub.example.com \
-  --cert-dir /root/cert/sub.example.com \
-  --profile-name DuskWander
+tools/deploy.sh --domain sub.example.com --profile-name DuskWander
 ```
 
 默认每一步都会停下来确认。全参数加 `--yes` 可跳过确认；再配 `< /dev/null` 让脚本跳过创建
 订阅，适合无人值守执行：
 
 ```bash
-tools/deploy.sh \
-  --domain sub.example.com \
-  --cert-dir /root/cert/sub.example.com \
-  --profile-name DuskWander \
+tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
   --with-rules --yes < /dev/null
 ```
 
 确认计划后，脚本会：
 
-1. 检查 root、依赖命令、x-ui 服务、数据库、证书、8443 端口和域名解析。
+1. 检查 root、依赖命令、x-ui 服务与数据库、443 入站、2096 监听、8443 端口和域名解析。
+   3x-ui 只读不写；443 入站或 2096 收口不符合预期时给出警告。
 2. 把 `server/` 复制到临时目录，替换域名、证书目录、显示名、规则前缀和规则仓库。
 3. 把要覆盖的文件备份到 `/root/sub-aggregator-backup-<时间戳>-<pid>/`。
-4. 安装 subconverter、管理脚本、systemd 单元和 Nginx 片段。
-5. 重启 subconverter，校验并重载 Nginx。
-6. 询问是否创建第一条订阅。创建后自动跑 `sub-manager test`。
-7. 如果加了 `--with-rules`，默认使用作者的规则集，工作副本不存在时自动克隆，然后启用同步
+4. 安装 subconverter、管理脚本、systemd 单元、Nginx 片段和 ACME 挑战路径。
+5. 重启 subconverter，校验并启动/重载 Nginx。
+6. 缺少证书时安装 acme.sh、用 webroot 签发到 `/root/cert/<域名>/`；已有 acme.sh 配置是
+   standalone 时改成 webroot，并确保续期后 reload Nginx（见 §2.4）。
+7. 询问是否创建第一条订阅。创建后自动跑 `sub-manager test`。
+8. 如果加了 `--with-rules`，默认使用作者的规则集，工作副本不存在时自动克隆，然后启用同步
    定时器并跑一次 `sub-rules-check`。
 
-非交互执行（`< /dev/null`）会跳过第 6 步，之后手工运行 `sub-manager add --from-xui` 和
+非交互执行（`< /dev/null`）会跳过第 7 步，之后手工运行 `sub-manager add --from-xui` 和
 `sub-manager test`。
 
 脚本不会修改 3x-ui、Xray 或 443 入站，也不会改动你的仓库工作副本。2096 收口需要手工执行，
@@ -71,7 +74,9 @@ tools/deploy.sh \
 | 参数 | 含义 |
 |---|---|
 | `--domain <域名>` | 订阅域名 |
-| `--cert-dir <目录>` | 证书目录，读取其中的 `fullchain.pem` 和 `privkey.pem` |
+| `--cert-dir <目录>` | 证书目录；默认自动查找，缺失时签发到 `/root/cert/<域名>` |
+| `--acme-email <邮箱>` | 首次安装 acme.sh 时注册账户用，可留空 |
+| `--no-issue-cert` | 缺少证书时不自动签发，直接报错 |
 | `--profile-name <名称>` | 订阅显示名，纯 ASCII，默认 `sub-aggregator` |
 | `--rules-prefix <hex>` | 规则端点前缀，默认随机生成 24 位 hex |
 | `--rules-repo <owner/repo>` | 规则仓库，默认 `DuskWander87/shadowrocket-config`；自定义时传 fork 的 owner/repo |
@@ -84,6 +89,39 @@ tools/deploy.sh \
 重装时，脚本会从已安装的 `sub-manager`、`sub-rules.conf` 和 `sub-rules-sync` 里读取域名、
 证书目录、显示名、规则前缀、规则仓库和工作副本，作为默认值；命令行参数优先。这样不会因为
 重跑一次脚本就静默换掉规则端点。
+
+### 2.4 证书与续期
+
+证书目录默认是 `/root/cert/<域名>/`，里面只放两个文件：
+
+```text
+fullchain.pem    # 证书链（0644）
+privkey.pem      # 私钥（0600）
+```
+
+脚本按以下顺序找证书，第一个可用的胜出：
+
+1. `--cert-dir` 指定的目录。
+2. `/root/cert/<域名>/`。
+3. `/etc/letsencrypt/live/<域名>/`（certbot）。
+4. acme.sh 的 `install-cert` 记录。
+5. 都没有时自动签发到 `/root/cert/<域名>/`。
+
+自动签发走 ACME HTTP-01：脚本安装 `/etc/nginx/conf.d/acme-challenge.conf`（监听 80，
+`server_name` 是订阅域名），acme.sh 以 `--webroot /var/www/acme` 写入挑战文件，签发 EC-256
+证书后用 `--install-cert` 落到证书目录，并设置续期后 `systemctl reload nginx`。要求域名的
+A/AAAA 记录指向本机、公网 80 端口可达。acme.sh 未安装时脚本从 `https://get.acme.sh` 安装，
+`--acme-email` 可指定注册邮箱（留空也能签发）。
+
+续期由 acme.sh 自带的 cron 任务执行，`acme.sh --list` 看下次时间。已有配置如果是 standalone
+（`Le_Webroot='no'`），脚本会改成 webroot，原文件保留为 `.conf.orig`：standalone 续期要独占
+80 端口，而 Nginx 已经占用 80。注意续期后 Nginx 必须 reload，否则它一直发旧证书；脚本会把
+`systemctl reload nginx` 追加到 acme.sh 原有的 reload hook 后面（3x-ui 自签的配置里通常已有
+`systemctl restart x-ui`）。如果之后在 3x-ui 面板里重新申请证书导致配置退回 standalone，重跑
+一次 `tools/deploy.sh` 即可。
+
+不想让脚本碰证书时加 `--no-issue-cert`：缺文件直接报错，已经存在的证书照常使用；脚本仍会
+修正 acme.sh 的续期方式，因为 Nginx 接管 80 端口后 standalone 续期必然失败。
 
 ## 3. 手动部署
 
@@ -99,7 +137,7 @@ grep -rn 'sub.example.com\|<RULES_PREFIX>\|DuskWander\|shadowrocket-config' serv
 
 | 值 | 含义 | 出现位置 |
 |---|---|---|
-| `sub.example.com` | 订阅域名 | `sub-manager`、`sub-rules-check`、`rulesets.txt` |
+| `sub.example.com` | 订阅域名 | `sub-manager`、`sub-rules-check`、`rulesets.txt`、`nginx/conf.d/acme-challenge.conf` |
 | `<RULES_PREFIX>` | 规则端点前缀，可用 `openssl rand -hex 12` 生成 | `sub-rules.conf`、`rulesets.txt`、`sub-rules-check` |
 | `/root/cert/sub.example.com/` | 证书目录 | `sub-manager` |
 | `DuskWander` | 订阅显示名 | `sub-manager`，同时要改 3x-ui 面板的「订阅标题」 |
@@ -131,11 +169,27 @@ install -m 0644 server/systemd/subconverter.service \
 systemctl daemon-reload
 systemctl enable --now subconverter
 
-# Nginx 片段
+# Nginx 片段与 ACME 挑战路径
 install -m 0644 server/nginx/snippets/sub-rules*.conf /etc/nginx/snippets/
 install -m 0644 server/nginx/conf.d/sub-rules-cache.conf /etc/nginx/conf.d/
+install -m 0644 server/nginx/conf.d/acme-challenge.conf /etc/nginx/conf.d/
+install -d -m 0755 /var/www/acme
 nginx -t && systemctl reload nginx
 ```
+
+没有现成证书时用 acme.sh 签发（`acme.sh` 未安装先执行 `curl https://get.acme.sh | sh`）：
+
+```bash
+acme.sh --issue -d sub.example.com --webroot /var/www/acme --keylength ec-256
+acme.sh --install-cert -d sub.example.com \
+  --key-file /root/cert/sub.example.com/privkey.pem \
+  --fullchain-file /root/cert/sub.example.com/fullchain.pem \
+  --reloadcmd "systemctl reload nginx"
+chmod 600 /root/cert/sub.example.com/privkey.pem
+```
+
+`acme-challenge.conf` 里的 `server_name` 要换成自己的域名；证书目录中的两个文件在 §3.1 的
+替换表里也已经列出。
 
 ### 3.3 建第一条订阅
 
@@ -234,6 +288,8 @@ curl -fsS http://127.0.0.1:25500/version
 sub-manager list
 sub-manager test
 nginx -t
+acme.sh --list                                    # 用 acme.sh 签发时：证书与下次续期时间
+openssl x509 -in /root/cert/sub.example.com/fullchain.pem -noout -enddate
 ```
 
 规则链启用后再跑：
@@ -245,8 +301,12 @@ sub-rules-check
 ## 6. 常见问题
 
 - **8443 被别的进程占用**：脚本会直接失败。先确认占用者，`ss -lntp | grep 8443`。
-- **证书路径不对**：脚本要求目录里同时有 `fullchain.pem` 和 `privkey.pem`。证书不在默认
-  位置时用 `--cert-dir` 指定。
+- **证书签发失败**：确认域名的 A/AAAA 记录指向本机、公网 80 端口可达（安全组 / 防火墙），
+  且 `nginx -t` 通过。Let's Encrypt 对同一域名有频率限制，失败后不要连续重试。已有证书想
+  手动放置时用 `--cert-dir` 指定目录，或加 `--no-issue-cert` 让脚本只检查。
+- **续期失败**：`acme.sh --list` 看下次续期时间；确认 `/etc/nginx/conf.d/acme-challenge.conf`
+  生效（`nginx -T | grep -A5 acme-challenge`），且 Nginx worker 能读 `/var/www/acme`。原来由
+  3x-ui 用 standalone 签发的证书，重跑部署脚本会自动改成 webroot。
 - **`add --from-xui` 读不到数据库**：确认 `x-ui.service` 在运行、`sqlite3` 已安装、
   `/etc/x-ui/x-ui.db` 可读。
 - **`sub-manager test` 失败**：先看是原始订阅拉取失败还是 Clash 转换失败。域名、证书、

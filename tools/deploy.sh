@@ -24,15 +24,25 @@ readonly DEFAULT_RULES_REPO="DuskWander87/shadowrocket-config"
 readonly SUBCONVERTER_VERSION="v0.9.9"
 readonly SUBCONVERTER_URL="https://github.com/asdlokj1qpi233/subconverter/releases/download/${SUBCONVERTER_VERSION}/subconverter_linux64.tar.gz"
 
+# 证书默认落点与 ACME 挑战路径。80 端口的 server 块见 server/nginx/conf.d/acme-challenge.conf。
+readonly DEFAULT_CERT_ROOT="/root/cert"
+readonly ACME_HOME="/root/.acme.sh"
+readonly ACME_WEBROOT="/var/www/acme"
+readonly ACME_NGINX_CONF="$NGINX_CONF_D_DIR/acme-challenge.conf"
+readonly APT_PACKAGES="curl jq sqlite3 openssl util-linux nginx tar iproute2 libc-bin gawk"
+
 DOMAIN=""
 CERT_DIR=""
 PROFILE_NAME=""
 RULES_PREFIX=""
 RULES_REPO=""
 RULES_WORKDIR="$DEFAULT_RULES_WORKDIR"
+ACME_EMAIL=""
 WITH_RULES=0
 DRY_RUN=0
 ASSUME_YES=0
+ISSUE_CERT=1
+CERT_NEEDS_ISSUE=0
 ROLLBACK_DIR=""
 WORK_DIR=""
 BACKUP_DIR=""
@@ -45,7 +55,9 @@ usage() {
 
 选项：
   --domain <域名>           订阅域名
-  --cert-dir <目录>         证书目录，含 fullchain.pem 和 privkey.pem
+  --cert-dir <目录>         证书目录；默认自动查找，缺失时签发到 /root/cert/<域名>
+  --acme-email <邮箱>       首次安装 acme.sh 时注册账户用，可留空
+  --no-issue-cert           缺少证书时不自动签发，直接报错
   --profile-name <名称>     订阅显示名，纯 ASCII
   --rules-prefix <hex>      规则端点前缀，默认随机生成 24 位 hex
   --rules-repo <owner/repo> 规则仓库，默认 DuskWander87/shadowrocket-config
@@ -88,6 +100,8 @@ parse_args() {
         case $1 in
             --domain) opt_value "$@"; DOMAIN=$2; shift 2 ;;
             --cert-dir) opt_value "$@"; CERT_DIR=$2; shift 2 ;;
+            --acme-email) opt_value "$@"; ACME_EMAIL=$2; shift 2 ;;
+            --no-issue-cert) ISSUE_CERT=0; shift ;;
             --profile-name) opt_value "$@"; PROFILE_NAME=$2; shift 2 ;;
             --rules-prefix) opt_value "$@"; RULES_PREFIX=$2; shift 2 ;;
             --rules-repo) opt_value "$@"; RULES_REPO=$2; shift 2 ;;
@@ -148,9 +162,79 @@ detect_existing_values() {
     fi
 }
 
+cert_files_ok() {
+    [[ -s "$1/fullchain.pem" && -s "$1/privkey.pem" ]]
+}
+
+acme_conf_file() {
+    local domain=$1 file
+    for file in "$ACME_HOME/${domain}_ecc/${domain}.conf" "$ACME_HOME/${domain}/${domain}.conf"; do
+        if [[ -r $file ]]; then
+            printf '%s\n' "$file"
+            return 0
+        fi
+    done
+    return 1
+}
+
+acme_installed_paths() {
+    # 输出来自 acme.sh install-cert 的证书目录。两个路径不在同一目录时返回非零，
+    # sub-manager 只接受一个目录。
+    local conf=$1 full key
+    full=$(sed -n "s/^Le_RealFullChainPath='\(.*\)'$/\1/p" "$conf" | head -n 1)
+    key=$(sed -n "s/^Le_RealKeyPath='\(.*\)'$/\1/p" "$conf" | head -n 1)
+    [[ -n $full && -n $key ]] || return 1
+    [[ $(dirname -- "$full") == "$(dirname -- "$key")" ]] || return 1
+    dirname -- "$full"
+}
+
+# 证书目录从域名推导，不再向用户提问。查找顺序：默认目录 → certbot → acme.sh 安装记录，
+# 都没有时签发到默认目录。--cert-dir 仍然可以覆盖。
+resolve_cert_dir() {
+    local candidate conf
+
+    if [[ -z $CERT_DIR ]]; then
+        for candidate in "$DEFAULT_CERT_ROOT/$DOMAIN" "/etc/letsencrypt/live/$DOMAIN"; do
+            if cert_files_ok "$candidate"; then
+                CERT_DIR=$candidate
+                log "证书：复用 $CERT_DIR"
+                return 0
+            fi
+        done
+        if conf=$(acme_conf_file "$DOMAIN") && candidate=$(acme_installed_paths "$conf") \
+            && cert_files_ok "$candidate"; then
+            CERT_DIR=$candidate
+            log "证书：复用 $CERT_DIR（来自 acme.sh 安装记录）"
+            return 0
+        fi
+        CERT_DIR="$DEFAULT_CERT_ROOT/$DOMAIN"
+    fi
+
+    if cert_files_ok "$CERT_DIR"; then
+        log "证书：复用 $CERT_DIR"
+        return 0
+    fi
+    if [[ $ISSUE_CERT -eq 0 ]]; then
+        fail "证书不完整：$CERT_DIR（需要 fullchain.pem 和 privkey.pem）。用 --cert-dir 指定位置，或去掉 --no-issue-cert。"
+    fi
+    CERT_NEEDS_ISSUE=1
+    log "证书：未找到，将用 acme.sh 签发到 $CERT_DIR"
+}
+
+prompt_acme_email() {
+    # 邮箱只在首次安装 acme.sh 时用到；已经装好的账户可以留空。
+    [[ $CERT_NEEDS_ISSUE -eq 1 ]] || return 0
+    if [[ -n $ACME_EMAIL || -x "$ACME_HOME/acme.sh" || ! -t 0 ]]; then
+        return 0
+    fi
+    local value
+    printf '用于注册 ACME 账户的邮箱（可留空）: ' >&2
+    IFS= read -r value
+    ACME_EMAIL=$value
+}
+
 prompt_values() {
     prompt_value DOMAIN "订阅域名" ""
-    prompt_value CERT_DIR "证书目录（含 fullchain.pem 和 privkey.pem）" "/root/cert/$DOMAIN"
     prompt_value PROFILE_NAME "订阅显示名（纯 ASCII）" "sub-aggregator"
     [[ -n $RULES_PREFIX ]] || RULES_PREFIX=$(openssl rand -hex 12)
     [[ -n $RULES_REPO ]] || RULES_REPO=$DEFAULT_RULES_REPO
@@ -179,28 +263,90 @@ validate_values() {
     done
 }
 
+xui_query() {
+    # 与 sub-manager 相同的读法：x-ui.db 是 journal_mode=delete，写事务会阻塞读，
+    # .timeout 给 3 秒重试窗口。空结果和读失败由调用方分开判断。
+    sqlite3 -readonly -noheader -cmd '.timeout 3000' \
+        "file:${XUI_DB}?mode=ro" "$1"
+}
+
 preflight() {
     require_root
-    local cmd
+
+    local cmd missing=()
     for cmd in curl jq sqlite3 openssl flock nginx systemctl tar install sed grep mktemp getent ss awk; do
-        have "$cmd" || fail "缺少命令：$cmd"
+        have "$cmd" || missing+=("$cmd")
     done
     if [[ $WITH_RULES -eq 1 ]]; then
-        have git || fail "缺少命令：git（--with-rules 需要）"
+        have git || missing+=("git")
     fi
+    if ((${#missing[@]} > 0)); then
+        printf '错误：缺少命令：%s\n' "${missing[*]}" >&2
+        printf '安装后重跑：apt-get update && apt-get install -y %s\n' "$APT_PACKAGES" >&2
+        exit 1
+    fi
+
     [[ -r $XUI_DB ]] || fail "读不到 3x-ui 数据库：$XUI_DB。先确认 3x-ui 已安装。"
     systemctl is-active --quiet x-ui.service || fail "x-ui.service 未运行。"
-    [[ -f "$CERT_DIR/fullchain.pem" ]] || fail "证书不存在：$CERT_DIR/fullchain.pem"
-    [[ -f "$CERT_DIR/privkey.pem" ]] || fail "私钥不存在：$CERT_DIR/privkey.pem"
+
+    # 3x-ui 只做检查，不改面板。443 入站缺失时订阅里的节点不可用，但聚合服务本身仍能装。
+    local inbound443
+    if inbound443=$(xui_query "select count(*) from inbounds where port = 443;" 2>/dev/null) \
+        && [[ -n $inbound443 ]]; then
+        if [[ ! $inbound443 =~ ^[0-9]+$ ]] || ((inbound443 == 0)); then
+            warn "3x-ui 没有监听 443 的入站，订阅里的节点可能不可用。"
+        fi
+    else
+        warn "读取 3x-ui 入站列表失败（可能写事务阻塞），跳过 443 入站检查。"
+    fi
+
+    local sub_listen="" entry bad=0
+    local -a entries=()
+    sub_listen=$(ss -lnt 2>/dev/null | awk '$4 ~ /:2096$/ {print $4}' | paste -sd, -)
+    if [[ -z $sub_listen ]]; then
+        warn "2096 未监听：3x-ui 订阅服务可能未启用，原生分支不可用。"
+    else
+        IFS=, read -r -a entries <<<"$sub_listen"
+        for entry in "${entries[@]}"; do
+            [[ $entry == "127.0.0.1:2096" || $entry == "[::1]:2096" ]] || bad=1
+        done
+        if [[ $bad -eq 0 ]]; then
+            log "2096：仅回环监听"
+        else
+            warn "2096 未收口到回环地址（当前 $sub_listen），见 deploy.md §3.5。"
+        fi
+    fi
+
+    if [[ $CERT_NEEDS_ISSUE -eq 1 ]]; then
+        if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]]; then
+            fail "现有 $NGINX_CONF_D_DIR/private-sub.conf 引用的证书缺失，Nginx 无法重载。先恢复证书，或删掉该文件后重跑。"
+        fi
+        if ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE '[:.]80$' \
+            && ! ss -lntp 2>/dev/null | grep -E '[:.]80[[:space:]]' | grep -q 'nginx'; then
+            fail "端口 80 已被其他进程占用，ACME HTTP-01 无法通过。先释放 80 端口。"
+        fi
+        log "证书：将用 acme.sh 通过 webroot $ACME_WEBROOT 签发"
+        [[ -x "$ACME_HOME/acme.sh" ]] \
+            || warn "acme.sh 未安装；部署时自动安装，也可先执行 curl https://get.acme.sh | sh"
+    else
+        [[ -f "$CERT_DIR/fullchain.pem" ]] || fail "证书不存在：$CERT_DIR/fullchain.pem"
+        [[ -f "$CERT_DIR/privkey.pem" ]] || fail "私钥不存在：$CERT_DIR/privkey.pem"
+    fi
 
     local mem_mb
     mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
     (( mem_mb >= 1800 )) || warn "内存只有 ${mem_mb} MB，建议至少 2 GB。"
 
-    if getent hosts "$DOMAIN" >/dev/null 2>&1; then
-        log "域名解析：$(getent hosts "$DOMAIN" | awk '{print $1}' | head -n 1)"
-    else
+    local resolved
+    # getent 解析失败时返回 2，pipefail 会让赋值失败；这里要的是「空」而不是中断。
+    resolved=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n 1) || true
+    if [[ -z $resolved ]]; then
         warn "域名 $DOMAIN 当前解析不到，确认 DNS 已生效。"
+    elif [[ $resolved == 127.0.0.1 || $resolved == ::1 ]]; then
+        log "域名解析：$resolved（本地回源）"
+    else
+        log "域名解析：$resolved"
+        warn "域名未指向 127.0.0.1；Clash 分支依赖 /etc/hosts 回源，见 deploy.md §3.5。"
     fi
 
     if ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE '[:.]8443$'; then
@@ -214,6 +360,7 @@ preflight() {
 }
 
 init_targets() {
+    local acme_conf
     INSTALL_TARGETS=(
         "$SBIN_DIR/sub-manager"
         "$SBIN_DIR/sub-rules-sync"
@@ -232,19 +379,31 @@ init_targets() {
         "$NGINX_SNIPPETS_DIR/sub-rules-upstream.conf"
         "$NGINX_CONF_D_DIR/sub-rules-cache.conf"
         "$NGINX_CONF_D_DIR/private-sub.conf"
+        "$ACME_NGINX_CONF"
     )
     if [[ $WITH_RULES -eq 1 ]]; then
         INSTALL_TARGETS+=("$PUBLISH_DIR")
     fi
+    # 续期方式可能被本脚本改写，回滚时一并恢复。
+    if acme_conf=$(acme_conf_file "$DOMAIN"); then
+        INSTALL_TARGETS+=("$acme_conf")
+    fi
 }
 
 print_plan() {
-    local repo_display=$RULES_REPO
+    local repo_display=$RULES_REPO cert_state
+    if [[ $CERT_NEEDS_ISSUE -eq 1 ]]; then
+        cert_state="acme.sh 签发（webroot $ACME_WEBROOT）"
+        [[ -x "$ACME_HOME/acme.sh" ]] || cert_state+="，需先安装 acme.sh"
+    else
+        cert_state="复用已有证书"
+    fi
     cat <<EOF
 部署计划
 
   域名:           $DOMAIN
   证书目录:       $CERT_DIR
+  证书:           $cert_state
   订阅显示名:     $PROFILE_NAME
   规则端点前缀:   $RULES_PREFIX
   规则仓库:       $repo_display
@@ -262,6 +421,8 @@ print_plan() {
     $NGINX_SNIPPETS_DIR/sub-rules-common.conf
     $NGINX_SNIPPETS_DIR/sub-rules-upstream.conf
     $NGINX_CONF_D_DIR/sub-rules-cache.conf
+    $ACME_NGINX_CONF
+    $ACME_WEBROOT/
 
   将重启/重载:
     subconverter
@@ -372,6 +533,105 @@ do_backup() {
     write_restore_script
 }
 
+ensure_acme() {
+    [[ -x "$ACME_HOME/acme.sh" ]] && return 0
+    log "安装 acme.sh"
+    # 固定 HOME，保证安装到 ACME_HOME；安装器会根据 HOME 决定落点。
+    if [[ -n $ACME_EMAIL ]]; then
+        ( export HOME=/root; curl -fsSL https://get.acme.sh | sh -s "email=$ACME_EMAIL" ) \
+            || fail "acme.sh 安装失败。"
+    else
+        ( export HOME=/root; curl -fsSL https://get.acme.sh | sh ) \
+            || fail "acme.sh 安装失败。"
+    fi
+    [[ -x "$ACME_HOME/acme.sh" ]] || fail "acme.sh 安装后未找到 $ACME_HOME/acme.sh。"
+}
+
+# acme.sh 把带空格或分号的 hook 存成 base64，读写时都要处理。
+decode_acme_value() {
+    local value=$1
+    if [[ $value == *__ACME_BASE64__START_* ]]; then
+        value=${value#*__ACME_BASE64__START_}
+        value=${value%%__ACME_BASE64__END_*}
+        printf '%s' "$value" | openssl base64 -d -A
+    else
+        printf '%s' "$value"
+    fi
+}
+
+set_acme_reloadcmd() {
+    local conf=$1 cmd=$2 encoded
+    encoded="__ACME_BASE64__START_$(printf '%s' "$cmd" | openssl base64 -A)__ACME_BASE64__END_"
+    if grep -q '^Le_ReloadCmd=' "$conf"; then
+        sed -i "s|^Le_ReloadCmd=.*$|Le_ReloadCmd='$encoded'|" "$conf"
+    else
+        printf "Le_ReloadCmd='%s'\n" "$encoded" >>"$conf"
+    fi
+}
+
+# 续期 hook 必须包含 reload nginx，同时保留原有的 hook（3x-ui 自签的配置里
+# 是 systemctl restart x-ui）。
+acme_reload_cmd() {
+    local conf cmd=""
+    if conf=$(acme_conf_file "$DOMAIN"); then
+        cmd=$(sed -n "s/^Le_ReloadCmd='\(.*\)'$/\1/p" "$conf" | head -n 1)
+        cmd=$(decode_acme_value "$cmd")
+    fi
+    [[ $cmd == *"reload nginx"* ]] || cmd="${cmd:+$cmd; }systemctl reload nginx"
+    printf '%s\n' "$cmd"
+}
+
+# acme.sh 的 standalone 续期要独占 80 端口；nginx 接管 80 之后续期会失败。
+# 已有配置是 standalone 时改成 webroot，并确保续期后 reload nginx——否则签发
+# 成功但 Nginx 一直拿着旧证书，等旧证书到期就开始报错。
+#
+# 只改配置文件，不调用 --install-cert：install-cert 会立即执行 reload hook，
+# 每次部署都重启一次 x-ui 等于碰 443。
+# 只处理 acme.sh 安装到 CERT_DIR 的证书；--cert-dir 指向别处时不碰它的配置。
+normalize_acme_renewal() {
+    local conf installed reloadcmd
+    conf=$(acme_conf_file "$DOMAIN") || return 0
+    installed=$(acme_installed_paths "$conf" 2>/dev/null || true)
+
+    if [[ -z $installed || $installed != "$CERT_DIR" ]]; then
+        if grep -qx "Le_Webroot='no'" "$conf"; then
+            warn "acme.sh 仍是 standalone 续期；nginx 占用 80 端口后续期会失败，见 deploy.md §2.4。"
+        fi
+        return 0
+    fi
+
+    if grep -qx "Le_Webroot='no'" "$conf"; then
+        [[ -f "$conf.orig" ]] || cp -a "$conf" "$conf.orig"
+        sed -i "s|^Le_Webroot='no'$|Le_Webroot='$ACME_WEBROOT'|" "$conf"
+        log "acme.sh 续期方式：standalone → webroot（$ACME_WEBROOT）"
+    fi
+
+    reloadcmd=$(acme_reload_cmd)
+    set_acme_reloadcmd "$conf" "$reloadcmd"
+}
+
+issue_cert() {
+    [[ $CERT_NEEDS_ISSUE -eq 1 ]] || return 0
+
+    ensure_acme
+    install -d -m 0755 "$ACME_WEBROOT" "$CERT_DIR"
+
+    # deploy.sh 的 umask 是 077。acme.sh 写挑战文件时会继承它，nginx worker
+    # 就读不到；签发阶段单独放回 022。
+    if ! ( umask 022; "$ACME_HOME/acme.sh" --issue -d "$DOMAIN" \
+            --webroot "$ACME_WEBROOT" --keylength ec-256 ); then
+        fail "acme.sh 签发失败。确认 $DOMAIN 已解析到本机、公网 80 端口可达。"
+    fi
+    "$ACME_HOME/acme.sh" --install-cert -d "$DOMAIN" \
+        --key-file "$CERT_DIR/privkey.pem" \
+        --fullchain-file "$CERT_DIR/fullchain.pem" \
+        --reloadcmd "$(acme_reload_cmd)" \
+        || fail "acme.sh install-cert 失败。"
+    chmod 0600 "$CERT_DIR/privkey.pem"
+    cert_files_ok "$CERT_DIR" || fail "签发后仍找不到证书文件：$CERT_DIR"
+    log "证书：已签发到 $CERT_DIR"
+}
+
 install_files() {
     local stage="$WORK_DIR/server"
 
@@ -398,7 +658,9 @@ install_files() {
     install -m 0644 "$stage/nginx/snippets/sub-rules.conf" \
         "$stage/nginx/snippets/sub-rules-common.conf" \
         "$stage/nginx/snippets/sub-rules-upstream.conf" "$NGINX_SNIPPETS_DIR/"
-    install -m 0644 "$stage/nginx/conf.d/sub-rules-cache.conf" "$NGINX_CONF_D_DIR/"
+    install -m 0644 "$stage/nginx/conf.d/sub-rules-cache.conf" \
+        "$stage/nginx/conf.d/acme-challenge.conf" "$NGINX_CONF_D_DIR/"
+    install -d -m 0755 "$ACME_WEBROOT"
 
     systemctl daemon-reload
     systemctl enable subconverter
@@ -407,16 +669,20 @@ install_files() {
         http://127.0.0.1:25500/version >/dev/null \
         || fail "subconverter 未在 127.0.0.1:25500 响应。"
 
-    # 重装时按新常量重建已有的 Nginx 配置；首次安装还没有这个文件。
-    if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]]; then
-        "$SBIN_DIR/sub-manager" resync
-    fi
-
     nginx -t
     if systemctl is-active --quiet nginx.service; then
         systemctl reload nginx
     else
         systemctl enable --now nginx
+    fi
+
+    # Nginx 已经接管 80 端口，先把续期方式修好，再签发。
+    normalize_acme_renewal
+    issue_cert
+
+    # 重装时按新常量重建已有的 Nginx 配置；首次安装还没有这个文件。
+    if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]]; then
+        "$SBIN_DIR/sub-manager" resync
     fi
 }
 
@@ -488,6 +754,8 @@ main() {
 
     detect_existing_values
     prompt_values
+    resolve_cert_dir
+    prompt_acme_email
     validate_values
     preflight
 

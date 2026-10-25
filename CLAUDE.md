@@ -61,6 +61,7 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 /etc/sub-manager/clients.json           # 订阅状态（0600，目录 0700）
 /etc/nginx/conf.d/private-sub.conf      # 【脚本生成，勿手改】
 /etc/nginx/conf.d/sub-rules-cache.conf  # proxy_cache_path 缓存区（仅兜底路径用）
+/etc/nginx/conf.d/acme-challenge.conf   # 80 端口 ACME 挑战（server_name = 订阅域名）
 /etc/nginx/snippets/sub-rules.conf      # 规则端点：本地文件优先 + GitHub 反代兜底
 /etc/nginx/snippets/sub-rules-common.conf
 /etc/nginx/snippets/sub-rules-upstream.conf
@@ -69,7 +70,8 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 /root/code/shadowrocket-config/         # 规则仓库 git 工作副本（0755，root）
 /var/lib/sub-rules/                     # 发布目录，nginx 直接 serve（0755，文件 0644）
 /opt/subconverter-classic/              # 转换后端（pref.ini / base/ / snippets/）
-/root/cert/sub.example.com/             # Let's Encrypt 证书
+/root/cert/sub.example.com/             # Let's Encrypt 证书（acme.sh webroot 续期）
+/var/www/acme/                          # ACME webroot（acme.sh 写入，Nginx 读取）
 /etc/hosts                              # 订阅域名 → 127.0.0.1，供 subconverter 拉取原始订阅
 /etc/x-ui/x-ui.db                       # 3x-ui 数据库
 ```
@@ -79,6 +81,7 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 
 | 端口 | 服务 |
 |---|---|
+| `80` | Nginx（仅 ACME HTTP-01 挑战） |
 | `443` | Xray VLESS Reality（**不要碰**） |
 | `2096` | 3x-ui 原生订阅（仅 `127.0.0.1`；订阅入口原生分支的回源目标） |
 | `35006` | 3x-ui 面板（HTTPS + 随机 Web Base Path） |
@@ -142,7 +145,7 @@ systemctl restart subconverter && sub-manager resync
 
 ```bash
 systemctl is-active x-ui subconverter nginx
-ss -lntp | grep -E ':(443|2096|35006|8443|25500)\b'   # 2096 应只有 127.0.0.1
+ss -lntp | grep -E ':(80|443|2096|35006|8443|25500)\b'   # 2096 应只有 127.0.0.1
 getent hosts sub.example.com                            # 占位符换成实际订阅域名；应返回 127.0.0.1
 curl -fsS http://127.0.0.1:25500/version
 nginx -t
@@ -171,6 +174,10 @@ nginx -t
   UUID。见 unified-subscription §6。
 - **2096 收口依赖 `/etc/hosts`**：订阅域名必须解析到 `127.0.0.1`，否则 Clash 分支报「本地
   转换失败」，原生分支正常。incidents `2026-10-18`
+- **证书续期走 80 端口 webroot**：`acme-challenge.conf` 与 `/var/www/acme` 是续期链路的一部分；
+  `sub-manager` 只读 `/root/cert/<域名>/` 的 `fullchain.pem` / `privkey.pem`，不参与签发。
+  acme.sh 的 reload hook 必须包含 `systemctl reload nginx`，否则续期后 Nginx 继续发旧证书，
+  旧证书到期后订阅入口开始报错。
 - **读 `x-ui.db` 要区分「空」与「失败」**：库是 `journal_mode=delete`，写事务会阻塞读，坏读
   返回空结果；所有查询带 `-cmd '.timeout 3000'`，并同时检查退出码和结果非空。把空当成
   「没有客户端」会得到「无漂移」的错误结论。incidents `2026-08-22 读 x-ui.db 偶发返回空`

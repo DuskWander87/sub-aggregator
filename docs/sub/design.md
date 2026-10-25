@@ -15,7 +15,8 @@
 - 无 Swap
 - 根分区 19 GB，部署前剩余约 15 GB
 - 域名：`sub.example.com`
-- 证书：Let's Encrypt，覆盖 `sub.example.com`
+- 证书：Let's Encrypt，覆盖 `sub.example.com`；acme.sh 通过 Nginx webroot（`/var/www/acme`）
+  以 HTTP-01 签发和续期，证书落到 `/root/cert/sub.example.com/`
 
 原有服务和端口：
 

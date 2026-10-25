@@ -289,7 +289,7 @@ systemctl is-enabled x-ui subconverter nginx
 端口：
 
 ```bash
-ss -lntp | grep -E ':(443|2096|35006|8443|25500)\b'
+ss -lntp | grep -E ':(80|443|2096|35006|8443|25500)\b'
 ```
 
 `2096` 应只出现 `127.0.0.1:2096`。域名解析供 subconverter 回源：
@@ -428,6 +428,7 @@ df -h /
 /usr/local/sbin/sub-rules-check
 /etc/nginx/conf.d/private-sub.conf
 /etc/nginx/conf.d/sub-rules-cache.conf
+/etc/nginx/conf.d/acme-challenge.conf
 /etc/nginx/snippets/sub-rules.conf
 /etc/nginx/snippets/sub-rules-common.conf
 /etc/nginx/snippets/sub-rules-upstream.conf
@@ -439,8 +440,12 @@ df -h /
 /opt/subconverter-classic/snippets/rulesets.txt
 /opt/subconverter-classic/snippets/groups.txt
 /root/cert/sub.example.com/
+/root/.acme.sh/
 /etc/x-ui/x-ui.db
 ```
+
+`/root/.acme.sh/` 含 ACME 账户私钥和续期配置，恢复后可继续自动续期；`/var/www/acme` 只是
+挑战文件的临时落点，不需要备份。
 
 `/opt/subconverter-classic` 可以从 Release 重新安装，但保留完整目录有利于快速恢复相同版本和
 模板。
