@@ -63,9 +63,12 @@ git push -> sub-rules-sync.timer（每分钟）-> /var/lib/sub-rules/
 | `80` | Nginx | 仅 ACME HTTP-01 挑战，其他路径 404 |
 | `443` | Xray VLESS Reality | 不要碰 |
 | `2096` | 3x-ui 原生订阅 | 仅 `127.0.0.1`；订阅入口原生分支的回源目标 |
-| `35006` | 3x-ui 面板 | HTTPS + 随机 Web Base Path |
+| `2053` | 3x-ui 面板 | 端口与路径由面板设置决定（`webPort` / `webBasePath`），当前是 `2053` |
 | `8443` | Nginx | 订阅入口 + 自维护规则端点 |
 | `25500` | Subconverter | 仅 `127.0.0.1` |
+
+`2096` 和面板端口都来自 3x-ui 的面板设置（`subPort` / `webPort`），不是固定契约；在面板里
+改过端口后同步更新本表。面板路径（`webBasePath`）始终是随机值，不写进文档。
 
 443 已由 Xray Reality 占用，因此订阅入口选择 `8443`，避免改动现有 Reality 入站或做复杂的
 SNI/fallback 分流。代价是 Clash 客户端会显示 `sub.example.com:8443`，那是从订阅 URL 解析出

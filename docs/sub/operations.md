@@ -289,7 +289,7 @@ systemctl is-enabled x-ui subconverter nginx
 端口：
 
 ```bash
-ss -lntp | grep -E ':(80|443|2096|35006|8443|25500)\b'
+ss -lntp | grep -E ':(80|443|2096|2053|8443|25500)\b'   # 面板端口以面板设置为准
 ```
 
 `2096` 应只出现 `127.0.0.1:2096`。域名解析供 subconverter 回源：
