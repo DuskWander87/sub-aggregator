@@ -8,6 +8,58 @@
 
 ---
 
+## 2026-11-07 回滚与恢复没有回到原状态
+
+### 现象
+
+由代码审查发现，未在生产环境触发。四条链路：
+
+- 默认部署（不带 `--with-rules`）后卸载再恢复：`sub-rules-sync.timer` 被启用，每分钟失败一次。
+- 回滚首次部署后，subconverter 进程仍残留在 25500 端口，之后的卸载也停不掉它。
+- 执行过 `rotate` / `remove` 后回滚部署：已撤销的订阅路径重新可用。
+- 回滚到 standalone 时期的部署备份后，acme.sh 续期失败。
+
+### 排查
+
+- `uninstall.sh` 生成的 restore 以「单元文件存在」作为启用 timer 的条件；而 deploy 总会安装
+  timer 单元，只在 `--with-rules` 时才启用。
+- `sub-rules-sync` 第 31 行在规则工作副本不存在时直接 `fail`（退出 1）。
+- deploy 生成的 restore 对 `remove.list` 里的路径直接 `rm -rf`，之前没有 `systemctl stop`。
+  `uninstall.sh` 的 `stop_services` 以单元文件存在为前提，同样停不掉这个进程。
+- 部署备份里有 `private-sub.conf`，但没有 `clients.json`：快照恢复的是旧路径，状态文件却已
+  记录撤销。
+- 真机最早两份部署备份里，acme.sh 的 conf 是 `Le_Webroot='no'`；恢复后 Nginx 仍占用 80 端口。
+- 两份 restore 都吞掉了 `nginx -t` 的失败，照样打印「已恢复」并退出 0。
+
+### 被排除的方向
+
+- 不是 systemd 行为异常：删除单元文件本来就不会停止运行中的服务。
+- 不是 tar 恢复导致的权限问题：root 解包会保留属主和权限。
+
+### 根因
+
+恢复脚本按「文件是否存在」推断状态，没有记录部署或卸载之前的实际状态；还把派生文件
+`private-sub.conf` 当成了可恢复的快照。
+
+### 解决方案
+
+- 卸载备份记录 `units.state`（每个单元的 is-enabled / is-active），restore 只启用原来启用的、
+  只启动原来在运行的；`nginx -t` 失败时以非 0 退出。
+- 部署 restore 先 `systemctl disable --now` 本次新建的单元，再删文件；不恢复
+  `private-sub.conf`，改为用恢复后的 `sub-manager resync` 重建；恢复出 standalone 而 80 端口
+  被占时提示；有检查未通过时以非 0 退出，`--rollback` 随之报错。
+- `uninstall.sh` 的 `stop_services` 无条件 `stop` 三个单元，`verify_uninstall` 检查 subconverter
+  是否仍在运行；入口加 ERR trap，中断时打印恢复命令。
+- deploy 装了 nginx 却在续期方式对齐之前退出（包括确认时取消）时，EXIT trap 提示 standalone
+  续期会失败。
+
+### 验证
+
+- `tools/selftest.sh` 的 T14–T20 先红后绿，T1–T13 保持通过。
+- `bash -n` 校验四个脚本；`tools/deploy.sh --dry-run` 退出 0。
+
+---
+
 ## 2026-11-07 复用 acme.sh 已有证书时，续期配置与实际证书不一致
 
 ### 现象

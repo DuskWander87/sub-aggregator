@@ -303,8 +303,16 @@ tools/deploy.sh --with-rules --rules-repo <你的账号>/shadowrocket-config
 tools/deploy.sh --rollback /root/sub-aggregator-backup-<时间戳>-<pid>
 ```
 
-或者直接运行备份目录里的 `restore.sh`。回滚会恢复被覆盖的配置，删除本次新建的配置；不会
-删除 `/etc/sub-manager/clients.json`。如果启用了规则定时器，回滚后手工执行：
+或者直接运行备份目录里的 `restore.sh`。回滚的行为：
+
+- 先停用本次新建的 systemd 单元，再删除本次新建的文件、恢复被覆盖的文件；
+- `/etc/nginx/conf.d/private-sub.conf` 不从备份恢复，而是用恢复后的 `sub-manager` 按当前
+  订阅状态 `resync` 重建，已撤销或轮换掉的路径不会重新生效；不会删除
+  `/etc/sub-manager/clients.json`；
+- 恢复出的 acme.sh 配置是 standalone、而 80 端口仍被占用时，给出提示（续期会失败）；
+- `nginx -t`、`resync` 等检查有未通过的，以非 0 退出。
+
+如果启用了规则定时器，回滚后手工执行：
 
 ```bash
 systemctl disable --now sub-rules-sync.timer
@@ -359,8 +367,11 @@ tools/uninstall.sh
 /root/sub-aggregator-uninstall-backup-<时间戳>-<pid>/restore.sh
 ```
 
-`restore.sh` 按原路径解包并重新启用服务。历史部署备份 `/root/sub-aggregator-backup-*` 不受
-影响。
+`restore.sh` 按原路径解包，再按卸载前记录的状态（备份里的 `units.state`）恢复 systemd 单元：
+只启用原来启用的、只启动原来在运行的。`nginx -t` 不通过时不重载 Nginx，并以非 0 退出。
+历史部署备份 `/root/sub-aggregator-backup-*` 不受影响。
+
+卸载会停掉残留的 subconverter 进程：即使单元文件已经不在，也先执行 `systemctl stop`。
 
 卸载不会收回节点访问：已拉取的 profile 里 UUID 仍然有效，真正踢人要去 3x-ui 删除或更换该
 客户端的 UUID，见 [unified-subscription.md](unified-subscription.md) §6。
@@ -368,6 +379,9 @@ tools/uninstall.sh
 ## 7. 常见问题
 
 - **8443 被别的进程占用**：脚本会直接失败。先确认占用者，`ss -lntp | grep 8443`。
+- **装好依赖后取消部署**：脚本装上的 nginx 已经启动并占用 80 端口，本机证书若用 acme.sh 或
+  certbot 的 standalone 方式续期，续期会失败；脚本退出时会提示。重新运行 `deploy.sh` 完成
+  部署（会把续期方式对齐为 webroot），或执行 `systemctl disable --now nginx`。
 - **证书签发失败**：确认域名的 A/AAAA 记录指向本机、公网 80 端口可达（安全组 / 防火墙），
   且 `nginx -t` 通过。Let's Encrypt 对同一域名有频率限制，失败后不要连续重试。已有证书想
   手动放置时用 `--cert-dir` 指定目录，或加 `--no-issue-cert` 让脚本只检查。

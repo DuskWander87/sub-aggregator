@@ -22,6 +22,7 @@ trap 'rm -rf -- "$SANDBOX"' EXIT
 readonly ROOT="$SANDBOX/sysroot"
 readonly COPY_DIR="$SANDBOX/repo/tools"
 readonly DEPLOY_COPY="$COPY_DIR/deploy.sh"
+readonly UNINSTALL_COPY="$COPY_DIR/uninstall.sh"
 readonly CA_DIR="$SANDBOX/ca"
 readonly STUB_BIN="$SANDBOX/bin"
 readonly XUI_DIR="$SANDBOX/xui"
@@ -346,6 +347,27 @@ run_deploy() {
     RC=$?
 }
 
+# run_uninstall <函数> ：同上，source uninstall 副本。
+run_uninstall() {
+    OUT=$( (
+        # shellcheck disable=SC1090
+        source "$UNINSTALL_COPY"
+        "$@"
+    ) 2>&1 )
+    RC=$?
+}
+
+# run_restore <备份目录> [环境变量...] ：作为子进程运行生成的 restore.sh，PATH 指向桩目录。
+# stdout 放 OUT，stderr 放 ERR，退出码放 RC。
+ERR=""
+run_restore() {
+    local dir=$1
+    shift
+    OUT=$(env "$@" PATH="$STUB_BIN:$PATH" "$dir/restore.sh" 2>"$SANDBOX/restore.err")
+    RC=$?
+    ERR=$(cat -- "$SANDBOX/restore.err")
+}
+
 # ---------- Phase 1：证书与续期 ----------
 
 b_issue_then_normalize() { CERT_NEEDS_ISSUE=1; issue_cert; normalize_acme_renewal; }
@@ -574,12 +596,159 @@ t13() {
     fi
 }
 
+# ---------- Phase 2：回滚、恢复与中断 ----------
+
+st_canned() {
+    install -d -m 0755 "$SANDBOX/systemctl/$1"
+    printf '%s\n' "$3" >"$SANDBOX/systemctl/$1/$2"
+}
+
+st_seed_uninstall() {
+    st_reset
+    local sd="$ROOT/etc/systemd/system"
+    install -d -m 0755 "$sd" "$ROOT/usr/local/sbin" "$ROOT/etc/nginx/conf.d"
+    printf '[Unit]\n' >"$sd/subconverter.service"
+    printf '[Unit]\n' >"$sd/sub-rules-sync.timer"
+    printf '#!/bin/sh\n' >"$ROOT/usr/local/sbin/sub-manager"
+    printf 'server {}\n' >"$ROOT/etc/nginx/conf.d/private-sub.conf"
+    st_canned is-enabled subconverter.service enabled
+    st_canned is-active subconverter.service active
+    st_canned is-enabled sub-rules-sync.timer disabled
+    st_canned is-active sub-rules-sync.timer inactive
+}
+
+b_un_backup() { build_remove_paths; do_backup; printf 'BK=%s\n' "$BACKUP_DIR"; }
+
+t14_t15() {
+    local id bk state calls want
+    want=$'subconverter.service enabled active\nsub-rules-sync.timer disabled inactive'
+    for id in T14 T15; do
+        st_seed_uninstall
+        run_uninstall b_un_backup
+        bk=$(printf '%s\n' "$OUT" | sed -n 's/^BK=//p' | tail -n 1)
+        state=$(cat -- "$bk/units.state" 2>/dev/null)
+        : >"$SANDBOX/calls.log"
+        if [[ $id == T14 ]]; then
+            run_restore "$bk"
+        else
+            run_restore "$bk" STUB_NGINX_T_RC=1
+        fi
+        calls=$(cat -- "$SANDBOX/calls.log")
+        if [[ $id == T14 ]]; then
+            if [[ $state == "$want" && $RC -eq 0 ]] \
+                && grep -q '^systemctl enable subconverter\.service' <<<"$calls" \
+                && grep -q '^systemctl start subconverter\.service' <<<"$calls" \
+                && ! grep -qE '^systemctl .*\b(enable|start)\b.*sub-rules-sync\.timer' <<<"$calls"; then
+                st_pass T14 "F4 卸载恢复按记录还原单元状态"
+            else
+                st_fail T14 "F4 卸载恢复按记录还原单元状态" \
+                    "units.state 两行正确；enable/start subconverter；不启用 timer；rc=0" \
+                    "state=$(oneline "$state") rc=$RC calls=$(oneline "$calls")"
+            fi
+        else
+            st_check T15 "F4 nginx -t 失败时恢复以非 0 退出" "rc≠0，stderr 含「nginx -t 未通过」" \
+                "rc=$RC stderr=$(oneline "$ERR")" \
+                eval '(( RC != 0 )) && has "$ERR" "nginx -t 未通过"'
+        fi
+    done
+}
+
+# 部署备份：restore.list / remove.list 先空着，由用例填。
+st_deploy_backup() {
+    st_reset
+    DBK="$SANDBOX/dbk"
+    rm -rf -- "$DBK"
+    install -d -m 0700 "$DBK"
+    : >"$DBK/restore.list"
+    : >"$DBK/remove.list"
+}
+# st_backup_file <路径> <备份内容> ：备份里放一份 <路径>，并登记到 restore.list。
+st_backup_file() {
+    install -d -m 0755 "$DBK$(dirname -- "$1")"
+    printf '%s\n' "$2" >"$DBK$1"
+    printf '%s\n' "$1" >>"$DBK/restore.list"
+}
+
+b_write_restore() { BACKUP_DIR=$1; write_restore_script; }
+
+t16() {
+    st_deploy_backup
+    local psc="$ROOT/etc/nginx/conf.d/private-sub.conf" content log=""
+    install -d -m 0755 "$(dirname -- "$psc")" "$ROOT/usr/local/sbin"
+    printf 'CURRENT\n' >"$psc"
+    st_backup_file "$psc" OLD
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>%q\n' "$SANDBOX/sub-manager.log" >"$ROOT/usr/local/sbin/sub-manager"
+    chmod 0755 "$ROOT/usr/local/sbin/sub-manager"
+    rm -f -- "$SANDBOX/sub-manager.log"
+    run_deploy b_write_restore "$DBK"
+    run_restore "$DBK"
+    content=$(cat -- "$psc" 2>/dev/null)
+    [[ -f $SANDBOX/sub-manager.log ]] && log=$(cat -- "$SANDBOX/sub-manager.log")
+    st_check T16 "P7 回滚不从快照恢复 private-sub.conf，改为 resync" "内容 CURRENT；sub-manager resync" \
+        "内容 $content；sub-manager 调用 $(oneline "$log")；rc=$RC $(oneline "$ERR")" \
+        eval '[[ $content == CURRENT && $log == *resync* ]]'
+}
+
+t17() {
+    st_deploy_backup
+    local unit="$ROOT/etc/systemd/system/subconverter.service" calls
+    install -d -m 0755 "$(dirname -- "$unit")"
+    printf '[Unit]\n' >"$unit"
+    printf '%s\n' "$unit" >>"$DBK/remove.list"
+    run_deploy b_write_restore "$DBK"
+    : >"$SANDBOX/calls.log"
+    run_restore "$DBK"
+    calls=$(cat -- "$SANDBOX/calls.log")
+    st_check T17 "O1 回滚删除单元前先停用" "systemctl disable --now subconverter.service [present]" \
+        "$(oneline "$calls")" has "$calls" "systemctl disable --now subconverter.service [present]"
+}
+
+t18() {
+    st_deploy_backup
+    local conf
+    conf=$(acme_conf)
+    install -d -m 0700 "$(dirname -- "$conf")"
+    printf "Le_Webroot='%s'\n" "$WEBROOT" >"$conf"
+    st_backup_file "$conf" "Le_Webroot='no'"
+    run_deploy b_write_restore "$DBK"
+    run_restore "$DBK" STUB_SS_PORT80=1
+    st_check T18 "P3 恢复出 standalone 而 80 被占时提示" "stderr 含「恢复为 standalone 续期，但 80 端口仍在监听」" \
+        "rc=$RC stderr=$(oneline "$ERR")" has "$ERR" "恢复为 standalone 续期，但 80 端口仍在监听"
+}
+
+b_on_exit() { WORK_DIR=""; INSTALLED_NGINX=1; ACME_NORMALIZED=$1; on_exit; }
+
+t19() {
+    local first second
+    st_reset
+    run_deploy b_on_exit 0
+    first=$OUT
+    run_deploy b_on_exit 1
+    second=$OUT
+    st_check T19 "P3 装了 nginx 却没完成部署时提示" "前者含 systemctl disable --now nginx；后者无输出" \
+        "前者 $(oneline "$first")；后者 $(oneline "$second")" \
+        eval '[[ $first == *"systemctl disable --now nginx"* && -z $second ]]'
+}
+
+b_stop_services() { stop_services; }
+
+t20() {
+    st_reset
+    run_uninstall b_stop_services
+    local calls
+    calls=$(cat -- "$SANDBOX/calls.log")
+    st_check T20 "O1 没有单元文件时仍停掉残留进程" "calls 含 systemctl stop subconverter.service" \
+        "$(oneline "$calls")" has "$calls" "systemctl stop subconverter.service"
+}
+
 # ---------- 入口 ----------
 
 main() {
     install -d -m 0700 "$CA_DIR" "$COPY_DIR"
     st_make_copy "$REPO/tools/deploy.sh" "$DEPLOY_COPY" strip
     st_assert_copy "$DEPLOY_COPY" strip
+    st_make_copy "$REPO/tools/uninstall.sh" "$UNINSTALL_COPY" strip
+    st_assert_copy "$UNINSTALL_COPY" strip
     st_write_path_stubs
     export PATH="$STUB_BIN:$PATH"
 
@@ -598,6 +767,12 @@ main() {
     t11
     t12
     t13
+    t14_t15
+    t16
+    t17
+    t18
+    t19
+    t20
 
     printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
     (( FAILED == 0 ))

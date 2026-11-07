@@ -70,6 +70,10 @@ ROLLBACK_DIR=""
 WORK_DIR=""
 BACKUP_DIR=""
 INSTALL_TARGETS=()
+# 本次由 install_dependencies 装上了 nginx（它会立即监听 80）；续期方式对齐之前
+# 退出时提示。
+INSTALLED_NGINX=0
+ACME_NORMALIZED=0
 # xui_uses_cert_dir 的结论：match / none / unknown。
 XUI_CERT_USAGE=""
 # 本次换了证书文件、而 x-ui 也用这张证书：部署结束时提示手工重启 x-ui。
@@ -531,6 +535,10 @@ install_dependencies() {
     apt-get update
     log "安装：${MISSING_PACKAGES[*]}"
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${MISSING_PACKAGES[@]}"
+    local pkg
+    for pkg in "${MISSING_PACKAGES[@]}"; do
+        if [[ $pkg == nginx ]]; then INSTALLED_NGINX=1; fi
+    done
 
     for cmd in "${MISSING_COMMANDS[@]}"; do
         have "$cmd" || still+=("$cmd")
@@ -786,7 +794,6 @@ apply_placeholders() {
 
 stage() {
     WORK_DIR=$(mktemp -d)
-    trap 'rm -rf -- "$WORK_DIR"' EXIT
     cp -a "$REPO_ROOT/server/." "$WORK_DIR/server/"
     apply_placeholders
 }
@@ -802,13 +809,37 @@ backup_path() {
     fi
 }
 
+# 生成的 restore.sh 按记录恢复部署之前的状态：
+# - 先停用本次新建的 systemd 单元，删掉单元文件不会让 systemd 停掉正在运行的服务；
+# - private-sub.conf 是派生文件，不从快照恢复（快照会让已撤销、已轮换的订阅路径重新
+#   生效），而是用恢复后的 sub-manager 按当前 clients.json 重建；
+# - 有检查未通过时以非 0 退出。
 write_restore_script() {
-    cat >"$BACKUP_DIR/restore.sh" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf '# 由 deploy.sh 生成：把本次部署覆盖或新建的文件恢复到部署之前。\n'
+        printf '%s=%q\n' \
+            SYSTEMD_DIR "$SYSTEMD_DIR" \
+            PRIVATE_SUB_CONF "$NGINX_CONF_D_DIR/private-sub.conf" \
+            SUB_MANAGER "$SBIN_DIR/sub-manager" \
+            ACME_HOME "$ACME_HOME"
+        cat <<'EOF'
+set -Euo pipefail
+rc=0
 backup_dir=$(cd -- "$(dirname -- "$0")" && pwd)
+
+if [[ -s $backup_dir/remove.list ]]; then
+    while IFS= read -r p; do
+        case $p in
+            "$SYSTEMD_DIR"/*.service|"$SYSTEMD_DIR"/*.timer)
+                systemctl disable --now "${p##*/}" 2>/dev/null || true ;;
+        esac
+    done <"$backup_dir/remove.list"
+fi
+
 if [[ -s $backup_dir/restore.list ]]; then
     while IFS= read -r p; do
+        [[ $p == "$PRIVATE_SUB_CONF" ]] && continue
         [[ -e "$backup_dir$p" ]] || continue
         mkdir -p "$(dirname -- "$p")"
         rm -rf -- "$p"
@@ -821,10 +852,46 @@ if [[ -s $backup_dir/remove.list ]]; then
     done <"$backup_dir/remove.list"
 fi
 systemctl daemon-reload || true
-if nginx -t; then systemctl reload nginx || true; fi
-systemctl restart subconverter 2>/dev/null || true
+
+if [[ -x $SUB_MANAGER && -f $PRIVATE_SUB_CONF ]]; then
+    if ! "$SUB_MANAGER" resync; then
+        printf 'sub-manager resync 失败，private-sub.conf 仍是回滚前的版本。\n' >&2
+        rc=1
+    fi
+fi
+
+if nginx -t; then
+    if ! systemctl reload nginx; then
+        printf 'systemctl reload nginx 失败。\n' >&2
+        rc=1
+    fi
+else
+    printf 'nginx -t 未通过，未重载 Nginx。\n' >&2
+    rc=1
+fi
+
+if [[ -f $SYSTEMD_DIR/subconverter.service ]]; then
+    if ! systemctl restart subconverter; then
+        printf 'systemctl restart subconverter 失败。\n' >&2
+        rc=1
+    fi
+fi
+
+# 恢复出的 acme.sh 配置是 standalone、而 80 端口仍被占用时，续期必然失败。
+if [[ -s $backup_dir/restore.list ]]; then
+    while IFS= read -r p; do
+        [[ $p == "$ACME_HOME"/*.conf && -f $p ]] || continue
+        grep -qx "Le_Webroot='no'" "$p" || continue
+        if ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE '[:.]80$'; then
+            printf 'acme.sh 恢复为 standalone 续期，但 80 端口仍在监听：续期会失败。重跑 tools/deploy.sh（会改回 webroot），或停掉占用 80 端口的服务。\n' >&2
+        fi
+    done <"$backup_dir/restore.list"
+fi
+
 printf '已从 %s 恢复。\n' "$backup_dir"
+exit "$rc"
 EOF
+    } >"$BACKUP_DIR/restore.sh"
     chmod 0700 "$BACKUP_DIR/restore.sh"
 }
 
@@ -1112,6 +1179,7 @@ install_files() {
     # 先装证书，再按安装结果对齐续期方式和 hook：acme.sh 跳过签发时不改 conf。
     issue_cert
     normalize_acme_renewal
+    ACME_NORMALIZED=1
     normalize_certbot_renewal
 
     # 重装时按新常量重建已有的 Nginx 配置；首次安装还没有这个文件。
@@ -1213,7 +1281,7 @@ do_rollback() {
     [[ -x "$ROLLBACK_DIR/restore.sh" ]] \
         || fail "备份目录里没有 restore.sh：$ROLLBACK_DIR"
     confirm "从 $ROLLBACK_DIR 恢复？" || { log "已取消。"; exit 0; }
-    "$ROLLBACK_DIR/restore.sh"
+    "$ROLLBACK_DIR/restore.sh" || fail "回滚已执行，但有检查未通过（见上方提示）。"
 }
 
 on_error() {
@@ -1225,6 +1293,17 @@ on_error() {
             "$REPO_ROOT/tools/deploy.sh" "$BACKUP_DIR" >&2
     fi
     exit "$rc"
+}
+
+# EXIT trap：清理临时目录；装了 nginx 却没走到续期方式对齐时提示（nginx 已占用 80，
+# standalone 续期会失败）。
+on_exit() {
+    if [[ -n $WORK_DIR ]]; then
+        rm -rf -- "$WORK_DIR"
+    fi
+    if (( INSTALLED_NGINX == 1 && ACME_NORMALIZED == 0 )); then
+        warn "本次安装的 nginx 已启动并监听 80 端口，但部署没有完成。若本机证书用 acme.sh 或 certbot 的 standalone 方式续期，续期会失败：重新运行 deploy.sh 完成部署，或执行 systemctl disable --now nginx。"
+    fi
 }
 
 main() {
@@ -1293,5 +1372,6 @@ main() {
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     trap on_error ERR
+    trap on_exit EXIT
     main "$@"
 fi

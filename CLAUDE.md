@@ -201,6 +201,8 @@ nginx -t
 - **两个分支都要带 `Vary: User-Agent`**：否则缓存会把 Clash 配置喂给 Shadowrocket。承接
   分流的 location 必须是精确匹配 + `internal`，不能用命名 location。见
   unified-subscription §3、§5
+- **恢复必须回到原状态**：卸载的 restore 按记录还原单元启用状态；部署回滚不从快照恢复
+  `private-sub.conf`，而是 resync。incidents `2026-11-07 回滚与恢复没有回到原状态`
 - **`nginx -t` 会 chown 缓存目录**：隔离校验配置里不能 include 生产的
   `sub-rules-cache.conf`，否则 `/var/cache/nginx/sub-rules` 属主被夺，规则端点返回 500。
   incidents `2026-08-10 nginx -t 夺走缓存目录属主`

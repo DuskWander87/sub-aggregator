@@ -33,6 +33,8 @@ readonly PUBLISH_DIR="/var/lib/sub-rules"
 readonly STATE_DIR="/etc/sub-manager"
 readonly NGINX_CACHE_DIR="/var/cache/nginx/sub-rules"
 readonly HOSTS_FILE="/etc/hosts"
+readonly ACME_WEBROOT="/var/www/acme"
+readonly BACKUP_ROOT="/root"
 # deploy.sh 复用 certbot 证书时安装的续期 hook，属于证书续期链路，卸载时保留。
 readonly CERTBOT_HOOK="/etc/letsencrypt/renewal-hooks/deploy/sub-aggregator.sh"
 
@@ -42,7 +44,7 @@ readonly NGINX_SNIPPETS=(sub-rules.conf sub-rules-common.conf sub-rules-upstream
 readonly NGINX_CONFS=(sub-rules-cache.conf private-sub.conf)
 readonly ACME_KEPT=(
     "$NGINX_CONF_D_DIR/acme-challenge.conf"
-    "/var/www/acme"
+    "$ACME_WEBROOT"
     "$CERTBOT_HOOK"
 )
 
@@ -64,7 +66,14 @@ systemd 单元、订阅状态、规则发布目录与缓存。运行后会先打
 EOF
 }
 
-fail() { printf '%s✗ 错误：%s%s\n' "$COLOR_ERROR" "$*" "$COLOR_RESET" >&2; exit 1; }
+# exit 不触发 ERR trap，备份之后的 fail 自己打印恢复命令。
+fail() {
+    printf '%s✗ 错误：%s%s\n' "$COLOR_ERROR" "$*" "$COLOR_RESET" >&2
+    if [[ -n $BACKUP_DIR && -x "$BACKUP_DIR/restore.sh" ]]; then
+        printf '恢复：%s/restore.sh\n' "$BACKUP_DIR" >&2
+    fi
+    exit 1
+}
 warn() { printf '%s⚠ 警告：%s%s\n' "$COLOR_WARN" "$*" "$COLOR_RESET" >&2; }
 log() { printf '%s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -144,31 +153,54 @@ existing_paths() {
     done
 }
 
+# 生成的 restore.sh 按卸载前记录的状态恢复：解包文件后，只启用原来启用的单元、只启动
+# 原来在运行的单元（units.state）；有检查未通过时以非 0 退出。
 write_restore_script() {
     cat >"$BACKUP_DIR/restore.sh" <<'EOF'
 #!/usr/bin/env bash
 # 由 uninstall.sh 生成：把聚合层恢复到卸载之前。
-set -Eeuo pipefail
+set -Euo pipefail
+rc=0
 backup_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 if [[ -s $backup_dir/files.tar.gz ]]; then
-    tar -xzPf "$backup_dir/files.tar.gz"
+    if ! tar -xzPf "$backup_dir/files.tar.gz"; then
+        printf '解包 %s 失败。\n' "$backup_dir/files.tar.gz" >&2
+        rc=1
+    fi
 fi
 systemctl daemon-reload || true
-systemctl enable subconverter 2>/dev/null || true
-systemctl start subconverter 2>/dev/null || true
-if [[ -f /etc/systemd/system/sub-rules-sync.timer ]]; then
-    systemctl enable --now sub-rules-sync.timer 2>/dev/null || true
+if [[ -s $backup_dir/units.state ]]; then
+    while read -r unit enabled active; do
+        [[ -n $unit ]] || continue
+        if [[ $enabled == enabled ]] && ! systemctl enable "$unit"; then
+            printf 'systemctl enable %s 失败。\n' "$unit" >&2
+            rc=1
+        fi
+        if [[ $active == active ]] && ! systemctl start "$unit"; then
+            printf 'systemctl start %s 失败。\n' "$unit" >&2
+            rc=1
+        fi
+    done <"$backup_dir/units.state"
 fi
-if nginx -t 2>/dev/null; then systemctl reload nginx || true; fi
+if nginx -t; then
+    if ! systemctl reload nginx; then
+        printf 'systemctl reload nginx 失败。\n' >&2
+        rc=1
+    fi
+else
+    printf 'nginx -t 未通过，未重载 Nginx。\n' >&2
+    rc=1
+fi
 printf '已从 %s 恢复。\n' "$backup_dir"
+exit "$rc"
 EOF
     chmod 0700 "$BACKUP_DIR/restore.sh"
 }
 
 do_backup() {
-    local stamp existing=()
+    local stamp existing=() u enabled active
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
-    BACKUP_DIR="/root/sub-aggregator-uninstall-backup-$stamp-$$"
+    BACKUP_DIR="$BACKUP_ROOT/sub-aggregator-uninstall-backup-$stamp-$$"
     install -d -m 0700 "$BACKUP_DIR"
 
     mapfile -t existing < <(existing_paths)
@@ -176,22 +208,30 @@ do_backup() {
         # -P 允许归档绝对路径；restore.sh 里按原位置解包。
         tar -czPf "$BACKUP_DIR/files.tar.gz" --absolute-names "${existing[@]}"
     fi
+    # 记录卸载前每个单元的启用与运行状态，恢复时照此还原，而不是按「单元文件存在」推断。
+    : >"$BACKUP_DIR/units.state"
+    for u in "${SERVICE_UNITS[@]}"; do
+        [[ -f "$SYSTEMD_DIR/$u" ]] || continue
+        enabled=$(systemctl is-enabled "$u" 2>/dev/null) || true
+        active=$(systemctl is-active "$u" 2>/dev/null) || true
+        printf '%s %s %s\n' "$u" "${enabled:-unknown}" "${active:-unknown}" >>"$BACKUP_DIR/units.state"
+    done
     write_restore_script
     log "备份：$BACKUP_DIR"
 }
 
+# stop 不以单元文件存在为前提：删掉单元文件不会让 systemd 停掉正在运行的服务，
+# 部署回滚可能留下这样的进程。disable 只对还在的单元文件做。timer 先停，免得它再触发 service。
 stop_services() {
-    if [[ -f "$SYSTEMD_DIR/sub-rules-sync.timer" ]]; then
-        systemctl disable --now sub-rules-sync.timer \
-            || warn "停用 sub-rules-sync.timer 失败，继续。"
-    fi
-    if [[ -f "$SYSTEMD_DIR/sub-rules-sync.service" ]]; then
-        systemctl stop sub-rules-sync.service 2>/dev/null || true
-    fi
-    if [[ -f "$SYSTEMD_DIR/subconverter.service" ]]; then
-        systemctl disable --now subconverter.service \
-            || warn "停用 subconverter.service 失败，继续。"
-    fi
+    local u
+    for u in sub-rules-sync.timer sub-rules-sync.service subconverter.service; do
+        systemctl stop "$u" 2>/dev/null || true
+    done
+    for u in sub-rules-sync.timer subconverter.service; do
+        if [[ -f "$SYSTEMD_DIR/$u" ]]; then
+            systemctl disable "$u" || warn "停用 $u 失败，继续。"
+        fi
+    done
 }
 
 remove_path() {
@@ -213,7 +253,8 @@ remove_nginx_configs() {
 
     if have nginx && ! nginx -t; then
         warn "删除配置后 nginx -t 未通过，正在从备份恢复。"
-        "$BACKUP_DIR/restore.sh" || fail "自动恢复失败，请手工运行 $BACKUP_DIR/restore.sh"
+        "$BACKUP_DIR/restore.sh" \
+            || fail "自动恢复已执行，但有检查未通过（见上方输出）；排查后可再次运行 $BACKUP_DIR/restore.sh"
         fail "已中止卸载，配置已恢复。"
     fi
     if systemctl is-active --quiet nginx.service; then
@@ -270,6 +311,10 @@ verify_uninstall() {
         warn "nginx -t 未通过。"
         failed=1
     fi
+    if systemctl is-active --quiet subconverter.service; then
+        warn "subconverter.service 仍在运行（单元文件已删除），执行 systemctl stop subconverter.service。"
+        failed=1
+    fi
     # 端口可能被无关进程占用，只提示，不算卸载失败。
     if ss -lntp 2>/dev/null | grep -qE ':(8443|25500)[[:space:]]'; then
         warn "8443 或 25500 仍在监听；若不是本服务残留，可能是其它进程占用。"
@@ -302,7 +347,16 @@ show_plan() {
     fi
     log "  nginx 包与运行中的进程"
     log ""
-    log "备份会写到 /root/sub-aggregator-uninstall-backup-<时间戳>-<pid>/。"
+    log "备份会写到 $BACKUP_ROOT/sub-aggregator-uninstall-backup-<时间戳>-<pid>/。"
+}
+
+on_error() {
+    local rc=$?
+    printf '\n错误：卸载中断（退出码 %s）。\n' "$rc" >&2
+    if [[ -n $BACKUP_DIR && -x "$BACKUP_DIR/restore.sh" ]]; then
+        printf '恢复：%s/restore.sh\n' "$BACKUP_DIR" >&2
+    fi
+    exit "$rc"
 }
 
 main() {
@@ -344,4 +398,7 @@ main() {
     exit "$verify_ok"
 }
 
-main "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    trap on_error ERR
+    main "$@"
+fi
