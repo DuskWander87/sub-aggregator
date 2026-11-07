@@ -163,6 +163,10 @@ fi
 if [[ \${STUB_SS_PORT8443:-0} -eq 1 ]]; then
     printf 'LISTEN 0 511 0.0.0.0:8443 0.0.0.0:*\n'
 fi
+# 任意监听行，原样输出（含 users:(("进程名",...)) 时可模拟占用者）。
+if [[ -n \${STUB_SS_EXTRA:-} ]]; then
+    printf '%s\n' "\$STUB_SS_EXTRA"
+fi
 exit 0
 EOF
     chmod 0755 "$STUB_BIN/systemctl" "$STUB_BIN/nginx" "$STUB_BIN/ss"
@@ -348,6 +352,7 @@ run_deploy() {
         }
         DOMAIN=$D
         CERT_DIR=$CERT
+        SUB_PORT=$DEFAULT_SUB_PORT
         "$@"
     ) 2>&1 )
     RC=$?
@@ -920,6 +925,106 @@ t29() {
         test "$api" = "$LE_API"
 }
 
+# ---------- 订阅端口 ----------
+
+b_detect_port() {
+    SUB_PORT=$1
+    detect_existing_values
+    printf 'PORT=%s\nCHANGED=%s\n' "$SUB_PORT" "$PORT_CHANGED_FROM"
+}
+
+t30() {
+    local a b c
+    st_reset
+    run_deploy b_detect_port ""
+    a="PORT=$(field PORT) CHANGED=$(field CHANGED)"
+    install -d -m 0755 "$SBIN"
+    printf 'readonly HOST="%s"\nreadonly PORT="9443"\n' "$D" >"$SBIN/sub-manager"
+    run_deploy b_detect_port ""
+    b="PORT=$(field PORT) CHANGED=$(field CHANGED)"
+    run_deploy b_detect_port 10443
+    c="PORT=$(field PORT) CHANGED=$(field CHANGED)"
+    st_check T30 "重装沿用已安装端口，换端口时记下旧值" \
+        "PORT= CHANGED= | PORT=9443 CHANGED= | PORT=10443 CHANGED=9443" "$a | $b | $c" \
+        test "$a | $b | $c" = "PORT= CHANGED= | PORT=9443 CHANGED= | PORT=10443 CHANGED=9443"
+}
+
+b_validate_port() { RULES_PREFIX=0123456789abcdef01234567; RULES_REPO=o/r; PROFILE_NAME=X; SUB_PORT=$1; validate_values && printf 'R=0\n'; }
+
+t31() {
+    local p got="" want="9443:0 65535:0 443:1 2096:1 25500:1 80:1 0:1 08443:1 65536:1 abc:1"
+    st_reset
+    for p in 9443 65535 443 2096 25500 80 0 08443 65536 abc; do
+        run_deploy b_validate_port "$p"
+        got+="$p:$(( RC == 0 ? 0 : 1 )) "
+    done
+    got=${got% }
+    st_check T31 "端口校验：范围与保留端口" "$want" "$got" test "$got" = "$want"
+}
+
+b_check_port() { SUB_PORT=$1; check_sub_port && printf 'R=0\n'; }
+
+t32() {
+    local free busy ours other
+    st_reset
+    run_deploy b_check_port 8443
+    free="rc=$RC"
+    STUB_SS_EXTRA='LISTEN 0 4096 0.0.0.0:8443 0.0.0.0:* users:(("caddy",pid=1,fd=3))' \
+        run_deploy b_check_port 8443
+    busy="rc=$RC $(oneline "$OUT")"
+    install -d -m 0755 "$(dirname -- "$PRIVATE_SUB")"
+    printf 'server {\n    listen 9443 ssl;\n}\n' >"$PRIVATE_SUB"
+    STUB_SS_EXTRA='LISTEN 0 511 0.0.0.0:9443 0.0.0.0:* users:(("nginx",pid=1,fd=6))' \
+        run_deploy b_check_port 9443
+    ours="rc=$RC $(oneline "$OUT")"
+    STUB_SS_EXTRA='LISTEN 0 511 0.0.0.0:10443 0.0.0.0:* users:(("nginx",pid=1,fd=7))' \
+        run_deploy b_check_port 10443
+    other="rc=$RC $(oneline "$OUT")"
+    st_check T32 "端口占用：他人占用失败并提示 --port；本服务沿用；其他 nginx 站点警告" \
+        "空闲 rc=0；caddy 占用 rc≠0 含 --port；本服务 rc=0 含「沿用」；他站 rc=0 含警告" \
+        "$free | $busy | $ours | $other" \
+        eval '[[ $free == "rc=0" && $busy == "rc=1 "*"--port"* && $ours == "rc=0 "*"沿用"* && $other == "rc=0 "*"警告"* ]]'
+}
+
+b_placeholders() {
+    WORK_DIR=$1
+    SUB_PORT=9443
+    PROFILE_NAME=X
+    RULES_PREFIX=ab8443cd8443ef0123456789
+    RULES_REPO=$DEFAULT_RULES_REPO
+    apply_placeholders
+}
+
+t33() {
+    st_reset
+    local work="$SANDBOX/stage" sm rs rc left
+    rm -rf -- "$work"
+    install -d -m 0700 "$work"
+    cp -a "$REPO/server/." "$work/server/"
+    run_deploy b_placeholders "$work"
+    sm=$(grep -c '^readonly PORT="9443"$' "$work/server/sbin/sub-manager")
+    rs=$(grep -c "https://$D:9443/r/ab8443cd8443ef0123456789/" "$work/server/subconverter/snippets/rulesets.txt")
+    rc=$(grep -cF "${D//./\\.}:9443/r/ab8443cd8443ef0123456789/" "$work/server/sbin/sub-rules-check")
+    left=$(grep -rlE "(sub\.example\.com|$D|${D//./\\\\.}):8443" "$work/server" | paste -sd, -)
+    st_check T33 "--port 9443 替换 sub-manager、rulesets.txt、sub-rules-check，前缀不受影响" \
+        "PORT 常量 1 处；rulesets 2 条；check 至少 1 处；无残留 :8443" \
+        "rc=$RC PORT=$sm rulesets=$rs check=$rc 残留=$left $(oneline "$OUT")" \
+        eval '(( RC == 0 && sm == 1 && rs == 2 && rc >= 1 )) && [[ -z $left ]]'
+}
+
+b_main_bad_port() {
+    collect_missing_dependencies() { MISSING_COMMANDS=(nginx); MISSING_PACKAGES=(nginx); return 0; }
+    install_dependencies() { printf 'INSTALLED=1\n'; }
+    main --port 443 --yes
+}
+
+t34() {
+    st_reset
+    run_deploy b_main_bad_port
+    st_check T34 "保留端口在安装依赖之前被拒绝" "rc≠0；未安装依赖" "rc=$RC $(oneline "$OUT")" \
+        eval '(( RC != 0 )) && ! has "$OUT" "INSTALLED=1" && has "$OUT" "固定端口"'
+}
+
 # ---------- 入口 ----------
 
 main() {
@@ -964,6 +1069,11 @@ main() {
     t27
     t28
     t29
+    t30
+    t31
+    t32
+    t33
+    t34
 
     printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
     (( FAILED == 0 ))

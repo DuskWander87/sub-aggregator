@@ -49,6 +49,8 @@ readonly ACME_KEPT=(
 )
 
 HOST=""
+# 订阅入口端口，从已安装的 sub-manager 读；读不到时按 deploy.sh 的默认值。
+SUB_PORT=""
 RULES_WORKDIR=""
 BACKUP_DIR=""
 REMOVE_PATHS=()
@@ -104,7 +106,9 @@ detect_installed() {
     # 只读已安装的管理脚本，用于输出提示；不查询也不写 3x-ui。
     if [[ -r "$SBIN_DIR/sub-manager" ]]; then
         HOST=$(sed -n 's/^readonly HOST="\(.*\)"$/\1/p' "$SBIN_DIR/sub-manager" | head -n 1)
+        SUB_PORT=$(sed -n 's/^readonly PORT="\([0-9]\{1,5\}\)"$/\1/p' "$SBIN_DIR/sub-manager" | head -n 1)
     fi
+    [[ -n $SUB_PORT ]] || SUB_PORT=8443
     if [[ -r "$SBIN_DIR/sub-rules-sync" ]]; then
         RULES_WORKDIR=$(sed -n 's/^REPO_DIR=\(.*\)$/\1/p' "$SBIN_DIR/sub-rules-sync" | head -n 1)
     fi
@@ -316,8 +320,8 @@ verify_uninstall() {
         failed=1
     fi
     # 端口可能被无关进程占用，只提示，不算卸载失败。
-    if ss -lntp 2>/dev/null | grep -qE ':(8443|25500)[[:space:]]'; then
-        warn "8443 或 25500 仍在监听；若不是本服务残留，可能是其它进程占用。"
+    if ss -lntp 2>/dev/null | grep -qE ":($SUB_PORT|25500)[[:space:]]"; then
+        warn "$SUB_PORT 或 25500 仍在监听；若不是本服务残留，可能是其它进程占用。"
     fi
     return "$failed"
 }

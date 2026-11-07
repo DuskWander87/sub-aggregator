@@ -19,7 +19,7 @@
 
 ```mermaid
 flowchart LR
-  D([设备]) -->|一条 HTTPS 地址| N[Nginx :8443]
+  D([设备]) -->|一条 HTTPS 地址| N["Nginx :8443（默认）"]
   N -->|Clash / Mihomo UA| C[Subconverter]
   C --> Y[完整 Mihomo YAML]
   N -->|其余 UA，原样透传| R[3x-ui 原生订阅]
@@ -36,13 +36,13 @@ flowchart LR
 - **订阅路径即凭据**：每条订阅一条含 48 位随机 hex 的 HTTPS 地址。`sub-manager rotate` 换路径即作废旧地址，订阅编号和源订阅都不变。
 - **与 3x-ui 只读联动**：`add --from-xui` 从面板客户端列表里挑人，原始订阅地址由 `subId` 推导。脚本对 x-ui、xray 和任何 `*.db` 零写操作。
 - **节点名保持恒定**：转换参数剥掉 3x-ui 追加的 `|📊<剩余流量>`，更新订阅后 Mihomo 仍能还原你手动选择的节点。
-- **规则集自托管**：自维护的 [ChinaDirect.list 和 Reject.list](https://github.com/DuskWander87/shadowrocket-config) 从 Git 发布到本机目录，Nginx 直接 serve，不经过 jsdelivr 或 GitHub 缓存。发布目录缺文件时才落到 GitHub 反代兜底。
+- **规则集自托管**：自维护的 [ChinaDirect.list 和 Reject.list](https://github.com/DuskWander87/shadowrocket-config) 从 Git 发布到本机目录，Nginx 直接 serve，不经过 jsdelivr 或 GitHub 缓存。发布目录缺文件时才由服务器侧回源 GitHub 兜底，客户端始终只连本站。
 - **低配友好**：无 Docker、无外部配置托管，2 GB 内存够用，端口避开 Xray Reality 占用的 443。
 - **每一步都能自证**：`sub-manager test` 对每条订阅发四种 UA 做端到端断言，`sub-rules-check` 核对端点、发布目录、git 副本和 origin 四处一致。
 
 ## 快速开始
 
-前提：一台跑着 3x-ui 的 Ubuntu 服务器，443 上有一个可用的 VLESS Reality 入站；一个指向它的域名（缺证书时脚本自动签发）；root 权限和至少 2 GB 内存。
+前提：一台跑着 3x-ui 的 Ubuntu 服务器，443 上有一个可用的 VLESS Reality 入站；一个指向它的域名（缺证书时脚本自动签发）；root 权限和至少 2 GB 内存；一个空闲的订阅入口端口（默认 `8443`，见下文）。
 
 在仓库根目录执行一条命令：
 
@@ -56,6 +56,21 @@ tools/deploy.sh
 [certificates.md](docs/sub/certificates.md)），缺失依赖会先确认安装；打印摘要后确认一次即
 完成部署，覆盖前先备份。想先预览加 `--dry-run`（只读，不改任何文件）。参数、手动步骤、
 规则链和回滚见 [deploy.md](docs/sub/deploy.md)。
+
+**订阅入口端口**：443 已被 Reality 占用，订阅入口默认监听 `8443`，它会出现在每条订阅地址里
+（`https://<域名>:8443/...`）。部署前确认两件事：
+
+- 端口空闲。被其他程序占用时脚本会在改动配置前报错退出，这时加 `--port` 换一个空闲端口：
+
+  ```bash
+  ss -lntp | grep ':8443 '         # 有输出说明已被占用
+  tools/deploy.sh --port 9443      # 换用其他端口
+  ```
+
+  `80`、`443`、`2096`、`25500` 是本系统其他组件的固定端口，不能用作订阅入口。
+- 防火墙 / 云安全组放行这个端口的 TCP 入站，否则设备拉不到订阅。
+
+重装时脚本沿用上次的端口。之后再改端口等于换订阅地址，所有设备都要重新配置。
 
 不想再用了就跑 `tools/uninstall.sh`。它会先打印计划再等确认，只删聚合层，3x-ui、节点、
 证书和 Nginx 本身不动。

@@ -65,7 +65,7 @@ git push -> sub-rules-sync.timer（每分钟）-> /var/lib/sub-rules/
 | `80` | Nginx | 仅 ACME HTTP-01 挑战，其他路径 404 |
 | `443` | Xray VLESS Reality | 不要碰 |
 | `2096` | 3x-ui 原生订阅 | 仅 `127.0.0.1`；订阅入口原生分支的回源目标 |
-| `8443` | Nginx | 订阅入口 + 自维护规则端点 |
+| `8443` | Nginx | 订阅入口 + 自维护规则端点；默认值，部署时可用 `--port` 改 |
 | `25500` | Subconverter | 仅 `127.0.0.1` |
 
 3x-ui 面板不占固定端口：端口和路径都由面板设置决定（`webPort` / `webBasePath`），用
@@ -74,9 +74,13 @@ git push -> sub-rules-sync.timer（每分钟）-> /var/lib/sub-rules/
 `2096` 来自面板的 `subPort` 设置（未设置时默认 2096），同样不是固定契约；改端口后同步更新
 本表。
 
-443 已由 Xray Reality 占用，因此订阅入口选择 `8443`，避免改动现有 Reality 入站或做复杂的
+443 已由 Xray Reality 占用，因此订阅入口默认用 `8443`，避免改动现有 Reality 入站或做复杂的
 SNI/fallback 分流。代价是 Clash 客户端会显示 `sub.example.com:8443`，那是从订阅 URL 解析出
 的服务器地址，不是订阅名称。
+
+订阅入口端口不是固定契约：`deploy.sh --port` 在部署时决定，写进 `sub-manager` 的 `PORT`
+常量、`rulesets.txt` 的规则地址和 `sub-rules-check`，三处由脚本一起替换。本文档其余位置
+写的 `8443` 都指这个端口；本机用的是默认值。
 
 ### 3.2 关键路径
 

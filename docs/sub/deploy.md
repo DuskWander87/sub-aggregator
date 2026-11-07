@@ -10,6 +10,9 @@
   存在入站的 `settings` JSON 里，后者拆成 `clients` / `client_inbounds` 两张表，脚本按表
   结构自动选择查询。
 - 域名已经指向这台服务器（签发证书需要公网 80 端口可达）。
+- 订阅入口端口空闲，且防火墙 / 云安全组放行 TCP 入站。默认 `8443`，被占用时用 `--port`
+  换一个；`80`、`443`、`2096`、`25500` 是其他组件的固定端口，不能用（见
+  [README.md](README.md) §3.1）。端口写进每条订阅地址，部署后再改需要所有设备重新配置。
 - 依赖命令：`curl`、`jq`、`sqlite3`、`openssl`、`flock`、Nginx、systemd 等（`--with-rules` 时
   还有 `git`）。脚本一次性检查，缺失时列出命令和对应 apt 包，确认后执行 `apt-get update`
   和 `apt-get install -y`；正式部署时非交互且没加 `--yes`，打印可以直接复制的命令。
@@ -41,17 +44,19 @@ tools/deploy.sh
 不带参数即可完成部署。脚本按下面的顺序执行，正常情况下只在打印摘要后停一次：
 
 1. 检查 root 权限，读取已安装的 `sub-manager`、`sub-rules.conf` 和 `sub-rules-sync` 里的
-   域名、证书目录、显示名、规则前缀和规则仓库，作为重装时的默认值。
+   域名、证书目录、订阅端口、显示名、规则前缀和规则仓库，作为重装时的默认值。
 2. 检查依赖命令。缺失时列出对应 apt 包，确认后安装；依赖先装好，后面的域名推导才用得上
    `sqlite3` 和 `openssl`。依赖齐全时不停顿。
 3. 推导域名：已安装配置 → 3x-ui 的 `subDomain` / `webDomain` → 3x-ui 记录的面板/订阅证书 →
    `/root/cert` 下唯一的证书，都找不到时才询问。证书目录由域名推导；改用不同的域名时，不沿用
    旧证书目录，摘要会标出域名变更。订阅显示名首次安装用默认 `DuskWander87`，重装沿用已安装
    的值；需要改时用 `--profile-name`。
-4. 检查 x-ui 服务与数据库、443 入站、2096 监听、8443 端口和域名解析，并打印部署摘要。
+4. 检查 x-ui 服务与数据库、443 入站、2096 监听、订阅端口和域名解析，并打印部署摘要。
+   订阅端口被 Nginx 以外的进程占用时直接失败，提示用 `--port` 换端口；端口与已安装的
+   不同时，摘要会标出端口变更。
    3x-ui 只读不写；443 入站或 2096 收口不符合预期时给出警告。
 5. 确认后备份到 `/root/sub-aggregator-backup-<时间戳>-<pid>/`，把 `server/` 复制到临时目录
-   并替换域名、证书目录、显示名、规则前缀和规则仓库。
+   并替换域名、证书目录、订阅端口、显示名、规则前缀和规则仓库。
 6. 安装 subconverter、管理脚本、systemd 单元、Nginx 片段、兜底缓存目录和 ACME 挑战路径；
    重启 subconverter，校验并启动/重载 Nginx。
 7. 签发或复用证书：缺少证书时安装 acme.sh、用 webroot 签发并安装到 `/root/cert/<域名>/`；
@@ -59,8 +64,8 @@ tools/deploy.sh
    Nginx、不重启 x-ui；面板或原生订阅也用这张证书时，结束时提示手工重启 x-ui。
 8. 如果加了 `--with-rules`，启用本机规则发布：规则仓库默认是作者的，工作副本不存在时
    自动克隆，然后启用同步定时器并跑一次 `sub-rules-check`。不加时 Clash 分支仍含规则表，
-   两个自维护列表由服务端反代 GitHub 兜底。
-9. 验证 x-ui / subconverter / nginx 状态、转换后端响应和 `nginx -t`，有订阅时检查 8443 入口，
+   两个自维护列表由服务器侧回源 GitHub 兜底，客户端只连本站订阅端口。
+9. 验证 x-ui / subconverter / nginx 状态、转换后端响应和 `nginx -t`，有订阅时检查订阅端口，
    打印 3x-ui 面板地址
    和建订阅的后续步骤。验证不通过时给出警告、以非 0 退出，并明确说明哪一项没过；已安装的
    文件保留。
@@ -97,6 +102,7 @@ tools/deploy.sh --domain sub.example.com --with-rules --yes
 | `--cert-dir <目录>` | 证书目录；默认自动查找，缺失时签发到 `/root/cert/<域名>` |
 | `--acme-email <邮箱>` | 可选：安装 acme.sh 时写入 ACME 账户联系邮箱 |
 | `--no-issue-cert` | 缺少证书时不自动签发，直接报错 |
+| `--port <端口>` | 订阅入口端口，默认 `8443`；被占用时换一个，不能是 80 / 443 / 2096 / 25500 |
 | `--profile-name <名称>` | 订阅显示名，纯 ASCII，默认 `DuskWander87` |
 | `--rules-prefix <hex>` | 规则端点前缀，默认随机生成 24 位 hex |
 | `--rules-repo <owner/repo>` | 规则仓库，默认 `DuskWander87/shadowrocket-config`；自定义时传 fork 的 owner/repo |
@@ -107,7 +113,7 @@ tools/deploy.sh --domain sub.example.com --with-rules --yes
 | `--rollback <备份目录>` | 从备份目录恢复 |
 
 重装时，脚本会从已安装的 `sub-manager`、`sub-rules.conf` 和 `sub-rules-sync` 里读取域名、
-证书目录、显示名、规则前缀、规则仓库和工作副本，作为默认值；命令行参数优先。这样不会因为
+证书目录、订阅端口、显示名、规则前缀、规则仓库和工作副本，作为默认值；命令行参数优先。这样不会因为
 重跑一次脚本就静默换掉规则端点。
 
 ### 2.4 证书与续期
@@ -155,11 +161,13 @@ grep -rn 'sub.example.com\|<RULES_PREFIX>\|DuskWander\|shadowrocket-config' serv
 | `sub.example.com` | 订阅域名 | `sub-manager`、`sub-rules-check`、`rulesets.txt`、`nginx/conf.d/acme-challenge.conf` |
 | `<RULES_PREFIX>` | 规则端点前缀，可用 `openssl rand -hex 12` 生成 | `sub-rules.conf`、`rulesets.txt`、`sub-rules-check` |
 | `/root/cert/sub.example.com/` | 证书目录 | `sub-manager` |
+| `8443` | 订阅入口端口 | `sub-manager` 的 `PORT`、`rulesets.txt`、`sub-rules-check` |
 | `DuskWander` | 订阅显示名 | `sub-manager` 的 `PROFILE_NAME`（两个分支同源，不必改面板） |
 | `DuskWander87/shadowrocket-config` | GitHub 兜底规则仓库 | `sub-rules.conf` |
 | `/root/code/shadowrocket-config` | 规则仓库的本机工作副本 | `sub-rules-check`、`sub-rules-sync`、`sub-rules-sync.service` |
 
-前 3 行必须换成你自己的值。后 3 行按你的显示名和规则仓库调整。订阅名保持纯 ASCII，两个
+前 3 行必须换成你自己的值。端口默认 `8443`，被占用时三处一起换成同一个空闲端口。后 3 行
+按你的显示名和规则仓库调整。订阅名保持纯 ASCII，两个
 服务器侧分支由同一个常量派生，细节见 [README.md](README.md) §3.4。改完 `sub-manager` 里的常量后，把脚本重新装到
 `/usr/local/sbin/`，再跑 `sub-manager resync`。
 
@@ -235,8 +243,8 @@ sub-manager test
 Clash 分支的订阅始终包含规则表。作者维护的
 [DuskWander87/shadowrocket-config](https://github.com/DuskWander87/shadowrocket-config)
 提供 `ChinaDirect.list` 和 `Reject.list` 两个自维护列表，规则内容可以直接在仓库里看到。
-这两条 URL 指向本站 `8443`；没有本地发布目录时，服务端反代 GitHub 兜底提供，客户端仍然
-只连本站。本节启用的是本地副本，不是「是否使用规则表」：本地发布能让更新延迟确定
+这两条 URL 指向本站订阅端口；没有本地发布目录时，由服务器侧回源 GitHub 兜底提供，客户端仍然
+只连本站，不直连 GitHub。本节启用的是本地副本，不是「是否使用规则表」：本地发布能让更新延迟确定
 （≤1 分钟），并在 GitHub 不可达时继续提供端点。为什么需要这一层，见
 [design.md](design.md) §9.4。
 
@@ -383,7 +391,11 @@ tools/uninstall.sh
 
 ## 7. 常见问题
 
-- **8443 被别的进程占用**：脚本会直接失败。先确认占用者，`ss -lntp | grep 8443`。
+- **订阅端口被别的进程占用**：脚本在改动配置前失败（此时缺失的依赖已经装上）。`ss -lntp | grep ':8443 '` 确认占用者，
+  然后加 `--port <空闲端口>` 重跑，并在防火墙 / 云安全组放行新端口。端口上已有其他站点的
+  Nginx 时脚本只警告并共用；那个站点若不是 TLS，会被订阅入口的 `ssl` 监听影响，同样换端口。
+- **改端口**：`--port <新端口>` 重装时，所有设备的订阅地址都要换成新端口重新配置；脚本在
+  摘要里标出端口变更，并重建订阅入口和规则地址。防火墙记得放行新端口。
 - **装好依赖后取消部署**：脚本装上的 nginx 已经启动并占用 80 端口，本机证书若用 acme.sh 或
   certbot 的 standalone 方式续期，续期会失败；脚本退出时会提示。重新运行 `deploy.sh` 完成
   部署（会把续期方式对齐为 webroot），或执行 `systemctl disable --now nginx`。
@@ -407,6 +419,6 @@ tools/uninstall.sh
 - **`add --from-xui` 读不到数据库**：确认 `x-ui.service` 在运行、`sqlite3` 已安装、
   `/etc/x-ui/x-ui.db` 可读。
 - **`sub-manager test` 失败**：先看是原始订阅拉取失败还是 Clash 转换失败。域名、证书、
-  2096 回源和 8443 入口都会影响结果，按 [operations.md](operations.md) §3.2 的验证基线逐层查。
+  2096 回源和订阅入口端口都会影响结果，按 [operations.md](operations.md) §3.2 的验证基线逐层查。
 - **规则端点 404**：先确认已经至少创建一条订阅，`sub-manager` 生成的 server 块才会包含
   `sub-rules.conf`。再确认发布目录和定时器状态，跑 `sub-rules-check`。

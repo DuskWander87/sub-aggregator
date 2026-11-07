@@ -36,6 +36,11 @@ readonly STATE_FILE="/etc/sub-manager/clients.json"
 readonly DEFAULT_RULES_WORKDIR="/root/code/shadowrocket-config"
 readonly DEFAULT_RULES_REPO="DuskWander87/shadowrocket-config"
 readonly DEFAULT_PROFILE_NAME="DuskWander87"
+# 订阅入口（Nginx）端口。443 被 Xray Reality 占用，所以默认 8443；被占用时用 --port 换。
+readonly DEFAULT_SUB_PORT="8443"
+# 本系统其他组件的固定端口，订阅入口不能用：80 ACME、443 Reality、2096 3x-ui 原生订阅、
+# 25500 subconverter。与 docs/sub/README.md §3.1 是同一份清单。
+readonly RESERVED_PORTS="80 443 2096 25500"
 readonly BACKUP_ROOT="/root"
 readonly SUBCONVERTER_VERSION="v0.9.9"
 readonly SUBCONVERTER_URL="https://github.com/asdlokj1qpi233/subconverter/releases/download/${SUBCONVERTER_VERSION}/subconverter_linux64.tar.gz"
@@ -61,6 +66,8 @@ DOMAIN_CANDIDATE=""
 DOMAIN_SOURCE=""
 CERT_DIR=""
 PROFILE_NAME=""
+SUB_PORT=""
+PORT_CHANGED_FROM=""
 RULES_PREFIX=""
 RULES_REPO=""
 RULES_WORKDIR="$DEFAULT_RULES_WORKDIR"
@@ -99,6 +106,7 @@ usage() {
   --cert-dir <目录>         证书目录；默认自动查找，缺失时签发到 /root/cert/<域名>
   --acme-email <邮箱>       可选：安装 acme.sh 时写入 ACME 账户联系邮箱
   --no-issue-cert           缺少证书时不自动签发，直接报错
+  --port <端口>             订阅入口端口（默认 8443，重装时沿用已安装的值）；被占用时换一个
   --profile-name <名称>     订阅显示名，纯 ASCII（默认 DuskWander87）
   --rules-prefix <hex>      规则端点前缀，默认随机生成 24 位 hex
   --rules-repo <owner/repo> 规则仓库，默认 DuskWander87/shadowrocket-config
@@ -149,6 +157,7 @@ parse_args() {
             --cert-dir) opt_value "$@"; CERT_DIR=$2; shift 2 ;;
             --acme-email) opt_value "$@"; ACME_EMAIL=$2; shift 2 ;;
             --no-issue-cert) ISSUE_CERT=0; shift ;;
+            --port) opt_value "$@"; SUB_PORT=$2; shift 2 ;;
             --profile-name) opt_value "$@"; PROFILE_NAME=$2; shift 2 ;;
             --rules-prefix) opt_value "$@"; RULES_PREFIX=$2; shift 2 ;;
             --rules-repo) opt_value "$@"; RULES_REPO=$2; shift 2 ;;
@@ -197,6 +206,16 @@ detect_existing_values() {
         DOMAIN_CHANGED_FROM=$installed_host
     elif [[ -z $CERT_DIR ]]; then
         CERT_DIR=$installed_cert
+    fi
+    # 重装时沿用已安装的端口：静默换回默认值会让所有设备的订阅地址失效。
+    local installed_port=""
+    if [[ -r "$SBIN_DIR/sub-manager" ]]; then
+        installed_port=$(sed -n 's/^readonly PORT="\([0-9]\{1,5\}\)"$/\1/p' \
+            "$SBIN_DIR/sub-manager" | head -n 1)
+    fi
+    [[ -n $SUB_PORT ]] || SUB_PORT=$installed_port
+    if [[ -n $installed_port && $SUB_PORT != "$installed_port" ]]; then
+        PORT_CHANGED_FROM=$installed_port
     fi
     if [[ -z $PROFILE_NAME && -r "$SBIN_DIR/sub-manager" ]]; then
         PROFILE_NAME=$(sed -n 's/^readonly PROFILE_NAME="\(.*\)"$/\1/p' \
@@ -429,6 +448,7 @@ prompt_values() {
 fill_defaults() {
     # openssl 可能刚由 install_dependencies 装上，所以放在依赖处理之后。
     [[ -n $PROFILE_NAME ]] || PROFILE_NAME=$DEFAULT_PROFILE_NAME
+    [[ -n $SUB_PORT ]] || SUB_PORT=$DEFAULT_SUB_PORT
     if [[ -z $RULES_PREFIX ]]; then
         if have openssl; then
             RULES_PREFIX=$(openssl rand -hex 12)
@@ -443,6 +463,13 @@ fill_defaults() {
     [[ -n $RULES_REPO ]] || RULES_REPO=$DEFAULT_RULES_REPO
 }
 
+validate_sub_port() {
+    [[ $SUB_PORT =~ ^[1-9][0-9]{0,4}$ ]] && (( SUB_PORT <= 65535 )) \
+        || fail "端口必须是 1 到 65535 的整数：$SUB_PORT"
+    [[ " $RESERVED_PORTS " != *" $SUB_PORT "* ]] \
+        || fail "端口 $SUB_PORT 是本系统其他组件的固定端口（$RESERVED_PORTS），用 --port 换一个，例如 --port 9443。"
+}
+
 validate_values() {
     [[ -n $DOMAIN ]] || fail "域名不能为空。"
     [[ $DOMAIN =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
@@ -454,6 +481,7 @@ validate_values() {
     [[ -n $PROFILE_NAME ]] || fail "显示名不能为空。"
     [[ $PROFILE_NAME =~ ^[A-Za-z0-9._-]+$ ]] \
         || fail "显示名只允许 ASCII 字母、数字、点、下划线、连字符。"
+    validate_sub_port
     [[ $RULES_PREFIX =~ ^[0-9a-f]{16,64}$ ]] \
         || fail "规则前缀必须是 16 到 64 位小写十六进制。"
     [[ -n $RULES_REPO && $RULES_REPO =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] \
@@ -681,16 +709,29 @@ preflight() {
         warn "域名未指向 127.0.0.1；Clash 分支依赖 /etc/hosts 回源，见 deploy.md §3.5。"
     fi
 
-    if have ss && ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE '[:.]8443$'; then
-        if ss -lntp 2>/dev/null | grep -E '[:.]8443[[:space:]]' | grep -q 'nginx'; then
-            warn "端口 8443 已有 nginx 监听，将复用现有 Nginx。"
-        else
-            fail "端口 8443 已被其他进程占用。"
-        fi
-    fi
+    check_sub_port
     # nginx 没装时依赖警告已经覆盖，这里只在已安装但未运行时提示。
     if have nginx && ! systemctl is-active --quiet nginx.service; then
         warn "nginx.service 未运行，部署时会启动。"
+    fi
+}
+
+# 订阅入口端口：其他进程占用时在改动之前失败，并提示 --port。
+check_sub_port() {
+    if [[ -n $PORT_CHANGED_FROM ]]; then
+        warn "订阅端口将从 $PORT_CHANGED_FROM 改为 $SUB_PORT：所有设备的订阅地址都要换成新端口，防火墙 / 云安全组也要放行 TCP $SUB_PORT。"
+    fi
+    if have ss && ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$SUB_PORT\$"; then
+        if ss -lntp 2>/dev/null | grep -E "[:.]$SUB_PORT[[:space:]]" | grep -q 'nginx'; then
+            if grep -qE "^[[:space:]]*listen[[:space:]]+$SUB_PORT[[:space:]]+ssl;" \
+                "$NGINX_CONF_D_DIR/private-sub.conf" 2>/dev/null; then
+                log "端口 $SUB_PORT：本服务的订阅入口已在监听，沿用。"
+            else
+                warn "端口 $SUB_PORT 已有 nginx 监听（可能是其他站点），将与之共用。若那是非 TLS 站点，订阅入口会让它也变成 TLS：改用 --port 换一个空闲端口。"
+            fi
+        else
+            fail "端口 $SUB_PORT 已被其他进程占用（ss -lntp | grep ':$SUB_PORT ' 查看）。用 --port 换一个空闲端口，例如 --port 9443。"
+        fi
     fi
 }
 
@@ -728,6 +769,12 @@ init_targets() {
     fi
 }
 
+# 摘要里的端口变更行，与域名变更行同一写法。
+port_change_line() {
+    [[ -n $PORT_CHANGED_FROM ]] || return 0
+    printf '\n  端口变更:       %s → %s（所有设备需要重新配置订阅地址）' "$PORT_CHANGED_FROM" "$SUB_PORT"
+}
+
 print_plan() {
     local repo_display=$RULES_REPO cert_state dep_state="已就绪"
     if [[ $CERT_NEEDS_ISSUE -eq 1 ]]; then
@@ -745,6 +792,7 @@ print_plan() {
   域名:           $DOMAIN$(if [[ -n $DOMAIN_CHANGED_FROM ]]; then printf '\n  域名变更:       %s → %s（所有设备需要重新配置订阅地址）' "$DOMAIN_CHANGED_FROM" "$DOMAIN"; fi)
   证书目录:       $CERT_DIR
   证书:           $cert_state
+  订阅端口:       $SUB_PORT$(port_change_line)
   依赖:           $dep_state
   订阅显示名:     $PROFILE_NAME
   规则端点前缀:   $RULES_PREFIX
@@ -774,7 +822,7 @@ print_plan() {
     $BACKUP_DIR
 
   规则发布:
-    $(if [[ $WITH_RULES -eq 1 ]]; then echo "启用 sub-rules-sync.timer（工作副本不存在时自动克隆 $RULES_REPO）"; else echo "本次不启用（Clash 分支仍含规则表，自维护列表由服务端反代 GitHub 兜底）"; fi)
+    $(if [[ $WITH_RULES -eq 1 ]]; then echo "启用 sub-rules-sync.timer（工作副本不存在时自动克隆 $RULES_REPO）"; else echo "本次不启用（Clash 分支仍含规则表，自维护列表由服务器侧回源 GitHub 兜底，客户端只连 $SUB_PORT）"; fi)
 EOF
 }
 
@@ -790,13 +838,14 @@ print_summary() {
     if [[ $WITH_RULES -eq 1 ]]; then
         rules_state="启用 sub-rules-sync.timer（本机发布）"
     else
-        rules_state="本次不启用（Clash 分支仍含规则表，服务端反代 GitHub 兜底）"
+        rules_state="本次不启用（Clash 分支仍含规则表，服务器侧回源 GitHub 兜底，客户端只连 $SUB_PORT）"
     fi
     cat <<EOF
 部署配置
 
   域名:           $DOMAIN$(if [[ -n $DOMAIN_CHANGED_FROM ]]; then printf '\n  域名变更:       %s → %s（所有设备需要重新配置订阅地址）' "$DOMAIN_CHANGED_FROM" "$DOMAIN"; fi)
   证书:           $cert_state
+  订阅端口:       $SUB_PORT$(port_change_line)
   订阅显示名:     $PROFILE_NAME
   规则端点前缀:   $RULES_PREFIX
   规则仓库:       $RULES_REPO
@@ -826,6 +875,14 @@ replace_in_files() {
 
 apply_placeholders() {
     local stage="$WORK_DIR/server"
+
+    # 端口跟在域名占位符后面，先于域名替换；只改带域名的 URL 和 PORT 常量，不做全局
+    # 替换（随机规则前缀里也可能出现这四个数字）。
+    replace_literal "$stage/sbin/sub-manager" "readonly PORT=\"$DEFAULT_SUB_PORT\"" \
+        "readonly PORT=\"$SUB_PORT\""
+    replace_literal "$stage/sbin/sub-rules-check" "sub\\.example\\.com:$DEFAULT_SUB_PORT" \
+        "sub\\.example\\.com:$SUB_PORT"
+    replace_in_files "sub.example.com:$DEFAULT_SUB_PORT" "sub.example.com:$SUB_PORT"
 
     # 证书目录含域名占位符，先替换它，再替换域名。
     replace_literal "$stage/sbin/sub-manager" "/root/cert/sub.example.com" "$CERT_DIR"
@@ -1302,10 +1359,10 @@ verify_deploy() {
     fi
     if (( SUB_COUNT > 0 )); then
         if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]] \
-            && ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE '[:.]8443$'; then
-            log "  ✓ 订阅入口 8443 已就绪（$SUB_COUNT 条订阅，端到端验证用 sub-manager test）"
+            && ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$SUB_PORT\$"; then
+            log "  ✓ 订阅入口 $SUB_PORT 已就绪（$SUB_COUNT 条订阅，端到端验证用 sub-manager test）"
         else
-            warn "有 $SUB_COUNT 条订阅，但 8443 订阅入口未就绪：运行 sub-manager resync，再 sub-manager test"
+            warn "有 $SUB_COUNT 条订阅，但 $SUB_PORT 订阅入口未就绪：运行 sub-manager resync，再 sub-manager test"
             failed=1
         fi
     fi
@@ -1332,6 +1389,7 @@ print_next_steps() {
     fi
     log "下一步：在 3x-ui 面板里创建节点和客户端"
     log ""
+    log "  订阅入口端口：$SUB_PORT（防火墙 / 云安全组需放行 TCP $SUB_PORT，否则设备拉不到订阅）"
     if [[ -n $panel_url ]]; then
         log "  面板地址：$panel_url"
     else
@@ -1418,6 +1476,8 @@ main() {
     require_root
 
     detect_existing_values
+    # 写错的端口不值得先装一轮依赖。占用检查要等依赖就绪，留在 preflight。
+    [[ -z $SUB_PORT ]] || validate_sub_port
 
     local deps_missing=0
     collect_missing_dependencies && deps_missing=1
