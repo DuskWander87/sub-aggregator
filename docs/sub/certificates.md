@@ -19,10 +19,9 @@ HTTPS 除了加密，还要向客户端证明「你连的确实是这个域名�
 
 所以它不是一个「只有聚合层用」的附属文件。换掉或弄丢它，面板和 2096 也会一起出问题。
 
-面板和原生订阅的这四处设置不由 `deploy.sh` 写入（脚本对 3x-ui 零写操作）。首次部署时在
-3x-ui 面板里把 `webCertFile` / `webKeyFile` 和 `subCertFile` / `subKeyFile` 指到
-`/root/cert/<域名>/fullchain.pem` 和 `privkey.pem`；改完再跑一次 `deploy.sh`，续期 hook
-才会补上 `systemctl restart x-ui`（hook 按部署当时的面板设置生成，见 §2.2）。
+面板和原生订阅的这四处设置在 3x-ui 面板里配置，`deploy.sh` 不写（脚本对 3x-ui 零写操作）：
+把 `webCertFile` / `webKeyFile` 和 `subCertFile` / `subKeyFile` 指到
+`/root/cert/<域名>/fullchain.pem` 和 `privkey.pem`。配置后重跑 `deploy.sh`，原因见 §2.2。
 
 为什么不能用自签名证书：浏览器和客户端默认不信任它。而且不只是外部客户端——服务器内部的
 subconverter 和 `sub-manager` 通过回环地址访问 `https://<域名>:2096` 时同样校验证书链，
@@ -45,14 +44,26 @@ acme.sh --issue
   -> Let's Encrypt 从公网访问 http://<域名>/.well-known/acme-challenge/<随机值> 校验
   -> 校验通过，签发证书
   -> acme.sh --install-cert 把文件落到 /root/cert/<域名>/
-  -> 执行 reload hook，让 Nginx 和 3x-ui 重新加载证书
+  -> 首次安装只 reload Nginx；续期时执行完整 hook（§2.2）
 ```
 
 挑战文件由 Nginx 的 `acme-challenge.conf` 提供，所以这件事要求：**域名的 A/AAAA 记录指向
-本机，且公网 80 端口可达**。签发源固定为 Let's Encrypt（`tools/deploy.sh` 里的
-`--server letsencrypt`），因此不需要邮箱，也不受本机 acme.sh 默认 CA 的影响。acme.sh 里
-已有一张有效证书时默认会直接复用；如果那张证书不是 Let's Encrypt 签发，脚本会强制重签
-一次，让证书和后续续期都落到这个 CA 上。
+本机，且公网 80 端口可达**。
+
+- **签发源**：固定为 Let's Encrypt（`tools/deploy.sh` 里的 `--server letsencrypt`），不受
+  本机 acme.sh 默认 CA 的影响。上游默认 CA 是 ZeroSSL，注册账户需要邮箱；Let's Encrypt 不
+  需要，`--acme-email` 只作为 ACME 账户的联系方式，可以不填。
+- **复用已有证书**：acme.sh 里已有一张有效证书时直接复用。判断它是否来自 Let's Encrypt
+  正式环境，看 acme.sh 存储的证书本身的签发者，不看 conf 里的 `Le_API`；不是时强制重签
+  一次，让证书和后续续期都落到这个 CA 上。staging 证书也会被重签。
+- **重签失败**：脚本把 acme.sh 的续期配置还原为部署前的版本并中止，现有证书不变。确认域名
+  解析和 80 端口后重跑；不想换 CA 时按 §4 把现有证书装到证书目录，加 `--no-issue-cert` 重跑。
+- **sudo**：通过 `sudo tools/deploy.sh` 直接运行时，acme.sh 会拒绝签发；脚本在做任何改动
+  之前就拒绝，并提示先 `sudo -i` 进入 root shell。
+
+acme.sh 的 conf 不能当作证书来源的证据：跳过签发时它不写 conf，签发失败时却已在下单前写了
+`Le_API` / `Le_Webroot`。原因见 [incidents.md](incidents.md)
+`2026-11-07 复用 acme.sh 已有证书时，续期配置与实际证书不一致`。
 
 ### 2.2 续期是怎么自动发生的
 
@@ -63,16 +74,52 @@ acme.sh 安装时会在 root 的 crontab 里加一条任务，每天运行一次
 ```
 
 `--cron` 每次都只做检查，只有剩余有效期进入续期窗口（约 30 天）才真正签发。续期成功后执行
-reload hook：
+acme.sh conf 里保存的 reload hook。`deploy.sh` 按下面的规则组成它：
+
+1. 保留原有命令（3x-ui 自己签发过的配置里通常已有 `systemctl restart x-ui`）；
+2. 补上 `systemctl reload nginx`；
+3. 面板或原生订阅的证书指向本证书目录、或读不到面板设置时，再补上
+   `systemctl restart x-ui || rc-service x-ui restart`。
+
+典型结果：
 
 ```text
-systemctl restart x-ui || rc-service x-ui restart
-systemctl reload nginx
+systemctl restart x-ui || rc-service x-ui restart; systemctl reload nginx
 ```
 
-两行都必要：面板/原生订阅由 x-ui 进程持有证书，聚合入口由 Nginx 持有。缺了 reload，文件换新
-了但进程还在发旧证书，到期后照样报错。`deploy.sh` 在面板或原生订阅的证书路径指向本证书目录
-时会把 restart 行补进 hook（读不到面板设置时同样补上）；不共用这张证书的部署只有 reload。
+两部分都必要：面板/原生订阅由 x-ui 进程持有证书，聚合入口由 Nginx 持有。缺了 reload，文件换新
+了但进程还在发旧证书，到期后照样报错。hook 按部署当时的面板设置生成，所以面板证书路径改过
+之后要重跑 `deploy.sh`。
+
+`--install-cert` 会立即执行传入的 hook。部署过程中脚本只传 `systemctl reload nginx`，不重启
+x-ui、不碰 443；完整 hook 在安装之后写回 acme.sh 的 conf，续期时才执行。面板或原生订阅用的
+正是这张证书时，部署结束会提示手工 `systemctl restart x-ui`。
+
+**续期方式对齐。**证书安装之后，脚本按 acme.sh conf 的 `Le_Webroot` 对齐续期方式：Nginx 已经
+占用 80 端口，standalone / alpn 这类独占端口的方式续期必然失败。
+
+| `Le_Webroot` | 处理 |
+|---|---|
+| `/var/www/acme` | 不动 |
+| `dns` / `dns_*` | 不动（DNS 验证不经过 80 端口） |
+| 含逗号（多个方式组合） | 警告，不动 |
+| `no`（standalone）、`alpn`、`apache`、`stateless`、`nginx`、`nginx:*`、其他目录 | 原文件保留为 `.conf.orig`，改为 `/var/www/acme` |
+| 其他 | 警告「未识别」，不动 |
+
+只有 acme.sh 的安装记录（`Le_RealFullChainPath` / `Le_RealKeyPath`）指向本证书目录时才对齐
+并写 hook。证书安装到别的目录时，脚本只警告：那份证书续期后不会更新 Nginx 用的文件。同一域名
+在 acme.sh 里同时有 RSA 与 ECC 两份配置时，脚本只管理 ECC 那份，并提示清理 RSA 那份。之后在
+3x-ui 面板里重新申请证书导致配置退回 standalone，重跑一次 `deploy.sh` 即可。
+
+**certbot。**证书目录在 `/etc/letsencrypt/live/<域名>/` 时，续期由 certbot 负责。脚本安装
+deploy hook `/etc/letsencrypt/renewal-hooks/deploy/sub-aggregator.sh`，内容按上面同样的规则
+包含 reload Nginx 和（需要时的）x-ui 重启。续期方式只检查、不改：
+`/etc/letsencrypt/renewal/<名称>.conf` 是 `authenticator = standalone`，或 webroot 不是
+`/var/www/acme` 时，脚本警告并给出命令：
+
+```bash
+certbot reconfigure --cert-name <名称> --webroot -w /var/www/acme
+```
 
 ## 3. 为什么不能直接删掉
 
@@ -113,7 +160,7 @@ systemctl is-active x-ui nginx subconverter        # 使用证书的服务
 先把文件重新落盘，再重跑 `deploy.sh`，不需要等续期时间：
 
 ```bash
-/root/.acme.sh/acme.sh --install-cert -d <域名> \
+/root/.acme.sh/acme.sh --install-cert --ecc -d <域名> \
   --key-file /root/cert/<域名>/privkey.pem \
   --fullchain-file /root/cert/<域名>/fullchain.pem \
   --reloadcmd "systemctl restart x-ui || rc-service x-ui restart; systemctl reload nginx"
@@ -123,7 +170,8 @@ systemctl is-active x-ui nginx subconverter        # 使用证书的服务
 缺失的文件，直接重跑会先在 preflight 被拒绝（「现有 private-sub.conf 引用的证书缺失」）。
 恢复时 `systemctl reload nginx` 可能因为配置尚未通过校验而报错，文件已经落盘，忽略后重跑
 `deploy.sh` 即可。`--install-cert` 会覆盖
-acme.sh 里保存的 reload hook，所以这里按 §2.2 把两行完整写回。
+acme.sh 里保存的 reload hook，所以这里按 §2.2 把完整 hook 写回。这条命令会立即执行 hook，
+x-ui 会重启，443 中断几秒。
 
 `/etc/hosts` 把订阅域名指到 `127.0.0.1` 不会影响签发：Let's Encrypt 从公网解析域名，不看
 本机 hosts。它影响的是服务端自己回源原始订阅，见
@@ -134,6 +182,5 @@ acme.sh 里保存的 reload hook，所以这里按 §2.2 把两行完整写回�
 - **「Cloudflare 上已经有证书了」**：DNS-only 时无关；开启代理后也只覆盖客户端到 Cloudflare
   这一段，源站这一段仍需要证书。
 - **「acme.sh 是订阅服务的一部分」**：不是。它只负责续期文件，订阅链路运行时完全不经过它。
-- **「签发必须填邮箱」**：只有 ZeroSSL 的账户注册需要邮箱。签发源已经固定为 Let's Encrypt，
-  邮箱变成可选，只作为 ACME 账户的联系方式。
+- **「签发必须填邮箱」**：不需要，签发源固定为 Let's Encrypt，见 §2.1。
 - **「Nginx 会自己续期」**：不会。Nginx 只负责读取证书文件，续期由 acme.sh 的定时任务完成。

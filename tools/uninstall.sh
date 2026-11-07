@@ -33,6 +33,8 @@ readonly PUBLISH_DIR="/var/lib/sub-rules"
 readonly STATE_DIR="/etc/sub-manager"
 readonly NGINX_CACHE_DIR="/var/cache/nginx/sub-rules"
 readonly HOSTS_FILE="/etc/hosts"
+# deploy.sh 复用 certbot 证书时安装的续期 hook，属于证书续期链路，卸载时保留。
+readonly CERTBOT_HOOK="/etc/letsencrypt/renewal-hooks/deploy/sub-aggregator.sh"
 
 readonly MANAGER_SCRIPTS=(sub-manager sub-rules-sync sub-rules-check)
 readonly SERVICE_UNITS=(subconverter.service sub-rules-sync.service sub-rules-sync.timer)
@@ -41,6 +43,7 @@ readonly NGINX_CONFS=(sub-rules-cache.conf private-sub.conf)
 readonly ACME_KEPT=(
     "$NGINX_CONF_D_DIR/acme-challenge.conf"
     "/var/www/acme"
+    "$CERTBOT_HOOK"
 )
 
 HOST=""
@@ -104,7 +107,8 @@ path_is_protected() {
         /|/root|/root/code|/etc|/etc/nginx|/etc/nginx/snippets|/etc/nginx/conf.d|\
         /etc/systemd|/etc/systemd/system|/usr|/usr/local|/usr/local/sbin|/opt|\
         /var|/var/lib|/var/cache|/var/cache/nginx|/var/www|/etc/x-ui|/etc/x-ui/*|\
-        /root/cert|/root/cert/*|/root/.acme.sh|/root/.acme.sh/*|"$HOSTS_FILE")
+        /root/cert|/root/cert/*|/root/.acme.sh|/root/.acme.sh/*|\
+        /etc/letsencrypt|/etc/letsencrypt/*|"$HOSTS_FILE")
             return 0 ;;
     esac
     return 1

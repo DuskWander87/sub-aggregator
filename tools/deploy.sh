@@ -34,6 +34,7 @@ readonly PUBLISH_DIR="/var/lib/sub-rules"
 readonly DEFAULT_RULES_WORKDIR="/root/code/shadowrocket-config"
 readonly DEFAULT_RULES_REPO="DuskWander87/shadowrocket-config"
 readonly DEFAULT_PROFILE_NAME="DuskWander87"
+readonly BACKUP_ROOT="/root"
 readonly SUBCONVERTER_VERSION="v0.9.9"
 readonly SUBCONVERTER_URL="https://github.com/asdlokj1qpi233/subconverter/releases/download/${SUBCONVERTER_VERSION}/subconverter_linux64.tar.gz"
 
@@ -45,6 +46,11 @@ readonly ACME_NGINX_CONF="$NGINX_CONF_D_DIR/acme-challenge.conf"
 # 签发源固定为 Let's Encrypt，不依赖本机 acme.sh 的默认 CA。上游默认是 ZeroSSL，
 # 注册账户需要邮箱；固定 CA 后签发不再需要邮箱。
 readonly ACME_CA_SERVER="letsencrypt"
+# certbot：复用 /etc/letsencrypt/live/<域名>/ 的证书时，在这里装 deploy hook。
+readonly CERTBOT_DIR="/etc/letsencrypt"
+readonly CERTBOT_HOOK="$CERTBOT_DIR/renewal-hooks/deploy/sub-aggregator.sh"
+# acme.sh 的 sudo 检查读这份清单，判断 SUDO_COMMAND 是否是登录 shell。
+readonly SHELLS_FILE="/etc/shells"
 
 DOMAIN=""
 DOMAIN_CANDIDATE=""
@@ -64,6 +70,10 @@ ROLLBACK_DIR=""
 WORK_DIR=""
 BACKUP_DIR=""
 INSTALL_TARGETS=()
+# xui_uses_cert_dir 的结论：match / none / unknown。
+XUI_CERT_USAGE=""
+# 本次换了证书文件、而 x-ui 也用这张证书：部署结束时提示手工重启 x-ui。
+XUI_RESTART_NOTE=0
 
 usage() {
     cat <<'EOF'
@@ -90,7 +100,15 @@ usage() {
 EOF
 }
 
-fail() { printf '%s✗ 错误：%s%s\n' "$COLOR_ERROR" "$*" "$COLOR_RESET" >&2; exit 1; }
+# exit 不触发 ERR trap，所以备份之后的 fail 要自己打印回滚命令。
+fail() {
+    printf '%s✗ 错误：%s%s\n' "$COLOR_ERROR" "$*" "$COLOR_RESET" >&2
+    if [[ -n $BACKUP_DIR && -x "$BACKUP_DIR/restore.sh" ]]; then
+        printf '备份目录：%s\n' "$BACKUP_DIR" >&2
+        printf '回滚命令：%s --rollback %s\n' "$REPO_ROOT/tools/deploy.sh" "$BACKUP_DIR" >&2
+    fi
+    exit 1
+}
 warn() { printf '%s⚠ 警告：%s%s\n' "$COLOR_WARN" "$*" "$COLOR_RESET" >&2; }
 log() { printf '%s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -296,14 +314,40 @@ acme_installed_paths() {
     dirname -- "$full"
 }
 
-# 现有证书的签发源是否为 Let's Encrypt。acme.sh 在证书未到期时直接返回
-# RENEW_SKIP（2），不比较 --server；后续 renew 也只认 conf 里的 Le_API。
-# 换 CA 必须自己判断并用 --force 重签，否则证书和续期都会留在旧 CA。
+# acme.sh 存储的 ECC 证书是否由 Let's Encrypt 正式环境签发。acme.sh 在证书未到期时
+# 直接返回 RENEW_SKIP（2），不比较 --server；后续 renew 只认 conf 里的 Le_API。
+# 换 CA 必须自己判断并用 --force 重签。
+#
+# 判断看证书本身的签发者，不看 conf 的 Le_API：acme.sh v3.1.3 的 issue() 在下单
+# （4582 行）之前就把 Le_API 写进 conf（4564-4565 行），签发失败也不回退，Le_API
+# 可能已经是 LE 而证书仍是旧 CA 的。staging 的 O=(STAGING) Let's Encrypt 不算。
 acme_cert_is_letsencrypt() {
-    local conf api
-    conf=$(acme_conf_file "$DOMAIN") || return 1
-    api=$(sed -n "s/^Le_API='\(.*\)'$/\1/p" "$conf" | head -n 1)
-    [[ $api == *"acme-v02.api.letsencrypt.org"* ]]
+    local cert="$ACME_HOME/${DOMAIN}_ecc/${DOMAIN}.cer"
+    [[ -r $cert ]] || return 1
+    openssl x509 -in "$cert" -noout -issuer -nameopt RFC2253 2>/dev/null \
+        | sed 's/^issuer=//' | tr ',' '\n' | grep -qxF "O=Let's Encrypt"
+}
+
+# 是否「普通用户用 sudo 直接运行」。照抄 acme.sh v3.1.3 的 _checkSudo：root 经 sudo、
+# sudo su、sudo -i / -s（SUDO_COMMAND 是登录 shell）都放行。
+sudo_env_blocked() {
+    [[ -n ${SUDO_GID:-} && -n ${SUDO_COMMAND:-} && -n ${SUDO_USER:-} && -n ${SUDO_UID:-} ]] \
+        || return 1
+    if [[ $SUDO_USER == root && $SUDO_UID == 0 ]]; then
+        return 1
+    fi
+    if [[ $SUDO_COMMAND == */bin/su || $SUDO_COMMAND == *"/bin/su "* ]]; then
+        return 1
+    fi
+    if grep -qxF -- "$SUDO_COMMAND" "$SHELLS_FILE" 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+# acme.sh 只在 stdout 是终端时做 sudo 检查（__INTERACTIVE），条件与它保持一致。
+acme_sudo_blocked() {
+    [[ -t 1 ]] && sudo_env_blocked
 }
 
 # 证书目录从域名推导，不再向用户提问。查找顺序：默认目录 → certbot → acme.sh 安装记录，
@@ -312,7 +356,7 @@ resolve_cert_dir() {
     local candidate conf
 
     if [[ -z $CERT_DIR ]]; then
-        for candidate in "$DEFAULT_CERT_ROOT/$DOMAIN" "/etc/letsencrypt/live/$DOMAIN"; do
+        for candidate in "$DEFAULT_CERT_ROOT/$DOMAIN" "$CERTBOT_DIR/live/$DOMAIN"; do
             if cert_files_ok "$candidate"; then
                 CERT_DIR=$candidate
                 log "证书：复用 $CERT_DIR"
@@ -538,6 +582,9 @@ preflight() {
     fi
 
     if [[ $CERT_NEEDS_ISSUE -eq 1 ]]; then
+        if acme_sudo_blocked; then
+            fail "当前通过 sudo 直接运行（SUDO_USER=$SUDO_USER），acme.sh 在这种方式下拒绝签发。先执行 sudo -i 进入 root shell，再运行 $REPO_ROOT/tools/deploy.sh。"
+        fi
         if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]]; then
             fail "现有 $NGINX_CONF_D_DIR/private-sub.conf 引用的证书缺失，Nginx 无法重载。先恢复证书，或删掉该文件后重跑。"
         fi
@@ -612,6 +659,9 @@ init_targets() {
     if acme_conf=$(acme_conf_file "$DOMAIN"); then
         INSTALL_TARGETS+=("$acme_conf")
     fi
+    if cert_dir_is_certbot; then
+        INSTALL_TARGETS+=("$CERTBOT_HOOK")
+    fi
 }
 
 print_plan() {
@@ -650,7 +700,7 @@ print_plan() {
     $NGINX_SNIPPETS_DIR/sub-rules-upstream.conf
     $NGINX_CONF_D_DIR/sub-rules-cache.conf
     $ACME_NGINX_CONF
-    $ACME_WEBROOT/
+    $ACME_WEBROOT/$(if cert_dir_is_certbot; then printf '\n    %s' "$CERTBOT_HOOK"; fi)
 
   将重启/重载:
     subconverter
@@ -827,14 +877,20 @@ set_acme_reloadcmd() {
 
 # 面板/原生订阅是否把证书指向本脚本安装的目录。是的话续期后必须重启 x-ui，
 # 否则它继续用内存里的旧证书。读不到设置时按「在用」处理：多一次重启，
-# 好过面板继续发旧证书。
+# 好过面板继续发旧证书。结论同时记在 XUI_CERT_USAGE（match / none / unknown），
+# 调用方要在当前 shell 里调用它，放进 $(...) 时这个变量带不回来。
 xui_uses_cert_dir() {
     local key path
+    XUI_CERT_USAGE=none
     for key in webCertFile subCertFile; do
         if path=$(xui_setting "$key"); then
             [[ -n $path ]] || continue
-            [[ $(dirname -- "${path%/}") == "$CERT_DIR" ]] && return 0
+            if [[ $(dirname -- "${path%/}") == "$CERT_DIR" ]]; then
+                XUI_CERT_USAGE=match
+                return 0
+            fi
         else
+            XUI_CERT_USAGE=unknown
             return 0
         fi
     done
@@ -857,33 +913,79 @@ acme_reload_cmd() {
     printf '%s\n' "$cmd"
 }
 
-# acme.sh 的 standalone 续期要独占 80 端口；nginx 接管 80 之后续期会失败。
-# 已有配置是 standalone 时改成 webroot，并确保续期后 reload nginx——否则签发
-# 成功但 Nginx 一直拿着旧证书，等旧证书到期就开始报错。
+# 在证书安装之后调用：按 acme.sh 的安装记录把续期方式对齐为 webroot，并写回完整
+# hook。acme.sh 的 standalone / alpn 续期要独占端口，Nginx 接管 80 之后续期会失败；
+# 续期后不 reload，Nginx 会一直拿着旧证书，等旧证书到期就开始报错。
 #
 # 只改配置文件，不调用 --install-cert：install-cert 会立即执行 reload hook，
 # 每次部署都重启一次 x-ui 等于碰 443。
-# 只处理 acme.sh 安装到 CERT_DIR 的证书；--cert-dir 指向别处时不碰它的配置。
+# 只处理 acme.sh 安装到 CERT_DIR 的证书；安装到别处时只警告，不碰它的配置。
 normalize_acme_renewal() {
-    local conf installed reloadcmd
+    local conf installed webroot reloadcmd
+    if [[ -r "$ACME_HOME/${DOMAIN}_ecc/${DOMAIN}.conf" && -r "$ACME_HOME/${DOMAIN}/${DOMAIN}.conf" ]]; then
+        warn "acme.sh 里同时有 $DOMAIN 的 RSA 与 ECC 两份证书配置，部署只管理 ECC（${DOMAIN}_ecc）。确认 RSA 那份不再使用后执行：$ACME_HOME/acme.sh --remove -d $DOMAIN"
+    fi
     conf=$(acme_conf_file "$DOMAIN") || return 0
     installed=$(acme_installed_paths "$conf" 2>/dev/null || true)
 
     if [[ -z $installed || $installed != "$CERT_DIR" ]]; then
-        if grep -qx "Le_Webroot='no'" "$conf"; then
-            warn "acme.sh 仍是 standalone 续期；nginx 占用 80 端口后续期会失败，见 deploy.md §2.4。"
-        fi
+        warn "acme.sh 里 $DOMAIN 的证书安装到 ${installed:-（无安装记录）}，不是 $CERT_DIR：它续期后不会更新 Nginx 用的这份文件，脚本也不改它的续期方式。要交给 acme.sh 续期，按 docs/sub/certificates.md §4 把证书安装到 $CERT_DIR 后重跑。"
         return 0
     fi
 
-    if grep -qx "Le_Webroot='no'" "$conf"; then
-        [[ -f "$conf.orig" ]] || cp -a "$conf" "$conf.orig"
-        sed -i "s|^Le_Webroot='no'$|Le_Webroot='$ACME_WEBROOT'|" "$conf"
-        log "acme.sh 续期方式：standalone → webroot（$ACME_WEBROOT）"
-    fi
+    # 对齐规则与 docs/sub/certificates.md §2.2 的表一致。逗号分隔表示多域名各用
+    # 不同方式，无法整体改写；DNS 验证不经过 80 端口，保持原样。
+    webroot=$(sed -n "s/^Le_Webroot='\(.*\)'$/\1/p" "$conf" | head -n 1)
+    case $webroot in
+        "$ACME_WEBROOT") ;;
+        dns|dns_*) ;;
+        *,*)
+            warn "acme.sh 里 $DOMAIN 的续期方式是多项组合（$webroot），脚本不改它。确认每一项都不依赖 80 端口独占，或手工改为 webroot $ACME_WEBROOT。" ;;
+        no|alpn|apache|stateless|nginx|nginx:*|/*)
+            [[ -f "$conf.orig" ]] || cp -a "$conf" "$conf.orig"
+            sed -i "s|^Le_Webroot=.*$|Le_Webroot='$ACME_WEBROOT'|" "$conf"
+            log "acme.sh 续期方式：$webroot → webroot（$ACME_WEBROOT）" ;;
+        *)
+            warn "acme.sh 里 $DOMAIN 的续期方式未识别（Le_Webroot='$webroot'），脚本不改它。确认续期不依赖 80 端口独占。" ;;
+    esac
 
     reloadcmd=$(acme_reload_cmd)
     set_acme_reloadcmd "$conf" "$reloadcmd"
+}
+
+cert_dir_is_certbot() {
+    [[ $CERT_DIR == "$CERTBOT_DIR/live/"* ]]
+}
+
+# 复用 certbot 的证书时，certbot 续期后要让 Nginx（以及使用同一证书的 x-ui）加载
+# 新证书：装一个 deploy hook。续期方式只检查、不改：renewal/*.conf 的格式归
+# certbot 所有，certbot reconfigure 还会联网试运行一次。
+normalize_certbot_renewal() {
+    cert_dir_is_certbot || return 0
+
+    local name renewal hook="systemctl reload nginx" tmp fix
+    name=$(basename -- "$CERT_DIR")
+    if xui_uses_cert_dir; then
+        hook="systemctl restart x-ui || rc-service x-ui restart; $hook"
+    fi
+    install -d -m 0755 "$(dirname -- "$CERTBOT_HOOK")"
+    tmp=$(mktemp "$CERTBOT_HOOK.XXXXXX")
+    printf '#!/bin/sh\n# 由 sub-aggregator 的 deploy.sh 生成：certbot 续期成功后让 Nginx（以及使用同一证书的 x-ui）加载新证书\n%s\n' \
+        "$hook" >"$tmp"
+    chmod 0755 "$tmp"
+    mv -f -- "$tmp" "$CERTBOT_HOOK"
+    log "certbot：续期后执行 $CERTBOT_HOOK（$hook）"
+
+    renewal="$CERTBOT_DIR/renewal/$name.conf"
+    fix="certbot reconfigure --cert-name $name --webroot -w $ACME_WEBROOT"
+    if [[ ! -r $renewal ]]; then
+        warn "找不到 certbot 的续期配置 $renewal，无法确认续期方式。若它用 standalone，Nginx 占用 80 端口后续期会失败：$fix"
+    elif grep -Eq '^[[:space:]]*authenticator[[:space:]]*=[[:space:]]*standalone[[:space:]]*$' "$renewal"; then
+        warn "certbot 用 standalone 续期 $name，Nginx 占用 80 端口后续期会失败。执行：$fix"
+    elif grep -Eq '^[[:space:]]*authenticator[[:space:]]*=[[:space:]]*webroot[[:space:]]*$' "$renewal" \
+        && ! grep -Eq "=[[:space:]]*${ACME_WEBROOT//./\\.},?[[:space:]]*$" "$renewal"; then
+        warn "certbot 的 webroot 不是 $ACME_WEBROOT，而 80 端口只为这个目录提供挑战路径，续期会失败。执行：$fix"
+    fi
 }
 
 issue_cert() {
@@ -894,20 +996,29 @@ issue_cert() {
 
     # deploy.sh 的 umask 是 077。acme.sh 写挑战文件时会继承它，nginx worker
     # 就读不到；签发阶段单独放回 022。
-    local rc=0
+    local rc=0 conf="" hook
     ( umask 022; "$ACME_HOME/acme.sh" --issue -d "$DOMAIN" \
         --server "$ACME_CA_SERVER" \
         --webroot "$ACME_WEBROOT" --keylength ec-256 ) || rc=$?
 
-    # acme.sh 在证书仍在有效期内、未到续期时间时返回 2（RENEW_SKIP），直接复用，
-    # 不比较 CA。已有证书不是 Let's Encrypt 时必须 --force 重签：否则 --server 对
-    # 这张证书不生效，后续 cron 续期也会继续用旧 CA（renew 只读 conf 里的 Le_API）。
+    # acme.sh 在证书仍在有效期内、未到续期时间时返回 2（RENEW_SKIP），不改 conf，
+    # 也不比较 CA。已有证书不是 Let's Encrypt 正式环境签发时 --force 重签一次。
+    # 重签失败时 acme.sh 已在下单前改写了 conf（Le_Webroot / Le_API），从本次的
+    # 部署备份还原，否则续期会对着旧证书用新 CA。
     if (( rc == 2 )) && ! acme_cert_is_letsencrypt; then
-        log "现有证书不是 Let's Encrypt 签发，强制重签。"
+        log "现有证书不是 Let's Encrypt 正式环境签发，强制重签。"
+        conf=$(acme_conf_file "$DOMAIN") || conf=""
         rc=0
         ( umask 022; "$ACME_HOME/acme.sh" --issue -d "$DOMAIN" \
             --server "$ACME_CA_SERVER" --force \
             --webroot "$ACME_WEBROOT" --keylength ec-256 ) || rc=$?
+        if (( rc != 0 )); then
+            if [[ -n $conf && -n $BACKUP_DIR && -f "$BACKUP_DIR$conf" ]]; then
+                cp -a -- "$BACKUP_DIR$conf" "$conf"
+                fail "强制重签失败（退出码 $rc），已把 acme.sh 的续期配置还原为部署前的版本，现有证书未改动。确认 $DOMAIN 解析到本机、公网 80 端口可达后重跑；不想换 CA 时，按 docs/sub/certificates.md §4 把现有证书装到 $CERT_DIR 后加 --no-issue-cert 重跑。"
+            fi
+            fail "强制重签失败（退出码 $rc），且没有可用的部署备份来还原 acme.sh 的续期配置：检查 ${conf:-acme.sh 的 $DOMAIN 配置} 的 Le_API / Le_Webroot。确认 $DOMAIN 解析到本机、公网 80 端口可达后重跑。"
+        fi
     fi
 
     # 这个分支只在首次部署且 acme.sh 里已有一张有效证书时可达；已有部署的安装副本
@@ -919,14 +1030,28 @@ issue_cert() {
     if (( rc == 2 )); then
         log "证书仍在 acme.sh 的存储里且未到续期时间，跳过签发，直接重新安装。"
     fi
-    "$ACME_HOME/acme.sh" --install-cert -d "$DOMAIN" \
+
+    # --install-cert 会先用传入的值覆盖 Le_ReloadCmd，再立即执行它。部署过程中只
+    # reload Nginx、不重启 x-ui（不碰 443）；完整 hook 在安装前算好，装完写回 conf，
+    # 续期时才执行。xui_uses_cert_dir 要在当前 shell 调用，XUI_CERT_USAGE 才带得回来。
+    xui_uses_cert_dir || true
+    hook=$(acme_reload_cmd)
+    "$ACME_HOME/acme.sh" --install-cert --ecc -d "$DOMAIN" \
         --key-file "$CERT_DIR/privkey.pem" \
         --fullchain-file "$CERT_DIR/fullchain.pem" \
-        --reloadcmd "$(acme_reload_cmd)" \
+        --reloadcmd "systemctl reload nginx" \
         || fail "acme.sh install-cert 失败。"
+    if conf=$(acme_conf_file "$DOMAIN"); then
+        set_acme_reloadcmd "$conf" "$hook"
+    fi
     chmod 0600 "$CERT_DIR/privkey.pem"
     cert_files_ok "$CERT_DIR" || fail "安装后仍找不到证书文件：$CERT_DIR"
     log "证书：已安装到 $CERT_DIR"
+    case $XUI_CERT_USAGE in
+        match) XUI_RESTART_NOTE=1 ;;
+        unknown)
+            warn "读不到 3x-ui 的证书设置：续期 hook 保守地包含 x-ui 重启。面板或原生订阅若使用 $CERT_DIR，现在执行 systemctl restart x-ui。" ;;
+    esac
 }
 
 install_files() {
@@ -984,9 +1109,10 @@ install_files() {
         systemctl enable --now nginx
     fi
 
-    # Nginx 已经接管 80 端口，先把续期方式修好，再签发。
-    normalize_acme_renewal
+    # 先装证书，再按安装结果对齐续期方式和 hook：acme.sh 跳过签发时不改 conf。
     issue_cert
+    normalize_acme_renewal
+    normalize_certbot_renewal
 
     # 重装时按新常量重建已有的 Nginx 配置；首次安装还没有这个文件。
     if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]]; then
@@ -1034,6 +1160,10 @@ print_next_steps() {
     fi
     log "回滚：$REPO_ROOT/tools/deploy.sh --rollback $BACKUP_DIR"
     log ""
+    if (( XUI_RESTART_NOTE == 1 )); then
+        log "面板或原生订阅使用 $CERT_DIR 的证书：执行 systemctl restart x-ui 让它加载新证书（443 会中断几秒）。"
+        log ""
+    fi
     log "下一步：在 3x-ui 面板里创建节点和客户端"
     log ""
     if [[ -n $panel_url ]]; then
@@ -1136,7 +1266,7 @@ main() {
     validate_values
     preflight
 
-    BACKUP_DIR="/root/sub-aggregator-backup-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    BACKUP_DIR="$BACKUP_ROOT/sub-aggregator-backup-$(date -u +%Y%m%dT%H%M%SZ)-$$"
     init_targets
 
     if [[ $DRY_RUN -eq 1 ]]; then

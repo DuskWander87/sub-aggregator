@@ -95,7 +95,7 @@ server/            真机配置的脱敏拷贝，靠人手工同步
   nginx/           订阅入口片段、规则端点、缓存区
   subconverter/    pref.ini、Mihomo 模板、自维护 snippets
   systemd/         转换后端与规则同步单元
-tools/             部署脚本 deploy.sh
+tools/             部署 deploy.sh、卸载 uninstall.sh、沙箱自测 selftest.sh
 docs/              中文运维文档
   sub/             订阅聚合服务：部署、订阅入口、设计、操作、故障记录
   3x-ui/           3x-ui / Reality 底座：故障排查归档
@@ -107,6 +107,7 @@ docs/              中文运维文档
 |---|---|
 | [docs/sub/README.md](docs/sub/README.md) | 找入口、查常量（端口、路径、`CONVERT_OPTS` 的单一事实源） |
 | [deploy.md](docs/sub/deploy.md) | 第一次安装、重装或卸载：前提、脚本、手动步骤、回滚 |
+| [certificates.md](docs/sub/certificates.md) | 证书给谁用、续期链路、能不能不用 acme.sh |
 | [design.md](docs/sub/design.md) | 要改系统，先看设计取舍 |
 | [unified-subscription.md](docs/sub/unified-subscription.md) | 给设备配订阅，或要改 UA 分流规则 |
 | [operations.md](docs/sub/operations.md) | 管理脚本、轮换撤销、检查与验证、备份 |

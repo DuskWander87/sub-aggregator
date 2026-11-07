@@ -8,6 +8,65 @@
 
 ---
 
+## 2026-11-07 复用 acme.sh 已有证书时，续期配置与实际证书不一致
+
+### 现象
+
+由代码审查发现，未在生产环境触发。两条链路：
+
+- 首次部署时复用 acme.sh 里一张有效的 Let's Encrypt standalone 证书：部署报告「验证通过」，
+  但 acme.sh 的 conf 仍是 `Le_Webroot='no'`。80 端口已被 Nginx 占用，证书到期前的续期会失败。
+- 已有证书不是 Let's Encrypt 签发，强制重签失败后重跑部署：装上的仍是旧 CA 的证书，并提示
+  「跳过签发，直接重新安装」。
+
+另外，部署途中 `--install-cert` 会立即执行带 `systemctl restart x-ui` 的 hook，443 中断几秒。
+
+### 排查
+
+- acme.sh v3.1.3 的 `issue()` 在 4498-4523 行做跳过检查，只比较到期时间和域名，返回
+  `RENEW_SKIP`（2）时不写 conf。
+- 4537、4565 行写 `Le_Webroot`、`Le_API`，早于 4582 行的注册账户与下单；失败回调不回退这两个
+  字段。签发成功后才在 5489 行写 `Le_NextRenewTime`。
+- `renew()` 在 5555-5577 行读取 conf 里的 `Le_API` 作为续期的 CA。
+- standalone 模式在 3640-3649 行检查端口，被占用就失败。
+- `install_files` 先调 `normalize_acme_renewal` 再调 `issue_cert`。首次部署时还没有安装记录，
+  normalize 走「不是本目录」分支直接返回；随后 `issue_cert` 跳过签发、装上证书，standalone
+  原样保留。
+- `acme_cert_is_letsencrypt` 读的是 conf 的 `Le_API`。强制重签失败后 conf 已是 LE，重跑时被
+  判为「已是 LE」，于是跳过重签。
+- 两条链路都在 `tools/selftest.sh` 的沙箱里复现（桩 acme.sh 按上述写入顺序模拟）。
+
+### 被排除的方向
+
+- 不是 `--server letsencrypt` 没生效：跳过路径根本不比较 CA。
+- 不是 acme.sh 版本异常：源码就是这个顺序。
+- 不是 Nginx 配置问题：`acme-challenge.conf` 工作正常，webroot 签发能通过。
+
+### 根因
+
+`issue_cert` 的复用分支依赖 acme.sh 在签发时改写 conf，而 acme.sh 跳过签发时不写，签发失败时
+却已经写了。conf 既不能证明证书来自哪个 CA，也不能在签发之前代表最终的安装结果。
+
+### 解决方案
+
+- `install_files` 改为 `issue_cert` → `normalize_acme_renewal` → `normalize_certbot_renewal`，
+  续期方式在证书安装之后按安装记录对齐。
+- `acme_cert_is_letsencrypt` 读 acme.sh 存储的证书的签发者，要求有一个 RDN 精确等于
+  `O=Let's Encrypt`；staging 不匹配。
+- 强制重签失败时，从本次部署备份把 acme.sh 的 conf 拷回原处再中止。
+- `--install-cert` 带 `--ecc`，只传 `systemctl reload nginx`；完整 hook 在安装前算好，装完写回
+  conf。面板或原生订阅用这张证书时，结束时提示手工重启 x-ui。
+- 续期方式对齐从只认 `'no'` 扩展为 `certificates.md` §2.2 的表；RSA 与 ECC 并存时警告。
+- 同批修正：sudo 直接运行时在 preflight 拒绝；`fail` 在备份之后打印回滚命令；复用 certbot
+  证书时安装 deploy hook，standalone 续期只警告并给出 `certbot reconfigure` 命令。
+
+### 验证
+
+- `tools/selftest.sh` 的 T1–T13 先红后绿（T4、T5 在旧代码上已通过，作为回归保护）。
+- `bash -n` 校验四个脚本；`tools/deploy.sh --dry-run` 退出 0。
+
+---
+
 ## 2026-10-25 首次部署在创建第一条订阅处中止
 
 ### 现象

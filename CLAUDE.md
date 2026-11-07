@@ -113,6 +113,7 @@ README §3.1。
 tools/deploy.sh                 # 一条命令部署（仓库工具，不装到真机）
 tools/deploy.sh --dry-run       # 只预览，不改任何文件
 tools/uninstall.sh              # 卸载聚合层；先打印计划再确认，不碰 3x-ui、证书与 Nginx
+tools/selftest.sh               # 沙箱回归：桩替代 acme.sh/systemctl/nginx，不碰真机
 ```
 
 订阅管理一律走脚本，不要手工编辑它生成的 Nginx 配置：
@@ -187,9 +188,13 @@ nginx -t
   `sub-manager` 只读 `/root/cert/<域名>/` 的 `fullchain.pem` / `privkey.pem`，不参与签发。
   acme.sh 的 reload hook 必须包含 `systemctl reload nginx`，否则续期后 Nginx 继续发旧证书，
   旧证书到期后订阅入口开始报错；面板或订阅证书指向同一目录时还要重启 x-ui，`deploy.sh`
-  会自动补上。签发固定用 Let's Encrypt（`--server letsencrypt`），不依赖
+  会自动补上。部署过程中只 reload Nginx，不重启 x-ui；完整 hook 写进 acme.sh 配置，续期时
+  执行。签发固定用 Let's Encrypt（`--server letsencrypt`），不依赖
   本机 acme.sh 的默认 CA（上游默认 ZeroSSL，注册需要邮箱）。这条证书同时被面板、2096 和
   8443 使用，不能只当作订阅入口的附属品；机制与故障判断见 `docs/sub/certificates.md`。
+- **acme.sh 的 conf 不能当证据**：跳过签发（返回 2）时不写 conf，签发失败时却已在下单前写了
+  `Le_API` / `Le_Webroot`。判断证书来源看存储的证书本身；续期方式在 `--install-cert` 之后对齐。
+  incidents `2026-11-07 复用 acme.sh 已有证书时，续期配置与实际证书不一致`
 - **读 `x-ui.db` 要区分「空」与「失败」**：库是 `journal_mode=delete`，写事务会阻塞读，坏读
   返回空结果；所有查询带 `-cmd '.timeout 3000'`，并同时检查退出码和结果非空。把空当成
   「没有客户端」会得到「无漂移」的错误结论。incidents `2026-08-22 读 x-ui.db 偶发返回空`
