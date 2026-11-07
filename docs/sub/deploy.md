@@ -11,10 +11,9 @@
   结构自动选择查询。
 - 域名已经指向这台服务器（签发证书需要公网 80 端口可达）。
 - 依赖命令：`curl`、`jq`、`sqlite3`、`openssl`、`flock`、Nginx、systemd 等（`--with-rules` 时
-  还有 `git`）。脚本一次性检查，缺失时列出命令和对应 apt 包并询问是否安装（交互式下放在订阅
-  域名和显示名提问之后），确认后执行 `apt-get update` 和 `apt-get install -y`；拒绝安装、
-  或正式部署时非交互且没加 `--yes`，打印可以直接复制的命令。只想安装依赖、不开始部署时用
-  `tools/deploy.sh --install-deps`。
+  还有 `git`）。脚本一次性检查，缺失时列出命令和对应 apt 包，确认后执行 `apt-get update`
+  和 `apt-get install -y`；正式部署时非交互且没加 `--yes`，打印可以直接复制的命令。
+  `--dry-run` 只报告缺失项，不安装。
 - 至少 2 GB 内存。
 
 域名也不需要手工提供：脚本按已安装的 `sub-manager`、3x-ui 的 `subDomain` / `webDomain`、
@@ -22,9 +21,10 @@
 Reality SNI 是目标站域名，不会被采用；推导结果不对时用 `--domain` 覆盖。
 
 证书不需要预先准备：脚本按 `/root/cert/<域名>/`、`/etc/letsencrypt/live/<域名>/`、
-acme.sh 的安装记录依次查找；都没有时用 acme.sh 通过 Nginx webroot 自动签发到
-`/root/cert/<域名>/`。想用自己的证书时把 `fullchain.pem` 和 `privkey.pem` 放进该目录；
-文件不全且希望直接报错、而不是自动签发时加 `--no-issue-cert`。
+acme.sh 的安装记录依次查找；都没有时用 acme.sh 通过 Nginx webroot 向 **Let's Encrypt**
+自动签发到 `/root/cert/<域名>/`，签发源固定，不受本机 acme.sh 默认 CA 影响。想用自己的证书
+时把 `fullchain.pem` 和 `privkey.pem` 放进该目录；文件不全且希望直接报错、而不是自动签发时加
+`--no-issue-cert`。证书给谁用、续期怎么跑，见 [certificates.md](certificates.md)。
 
 还没有 3x-ui 底座，可以先看 [自建节点教程 3XUI 面板（无限芝士）](https://www.youtube.com/watch?v=TRVE7sVTgWw)。
 
@@ -32,47 +32,36 @@ acme.sh 的安装记录依次查找；都没有时用 acme.sh 通过 Nginx webro
 
 部署只有一个入口：`tools/deploy.sh`，不需要其他工具或中间层。
 
-### 2.1 先看计划
+### 2.1 一条命令
 
 ```bash
-tools/deploy.sh --dry-run \
-  --domain sub.example.com \
-  --profile-name DuskWander
+tools/deploy.sh
 ```
 
-不带参数时脚本只询问订阅显示名（首次自动签发且没装 acme.sh 时还会问一个可留空的邮箱）；
-域名从 3x-ui 配置或证书推导，证书目录由域名推导，规则前缀、规则仓库都有默认值。dry-run
-只做检查并打印计划，不改任何文件；缺少依赖时只报告，用 `--install-deps` 单独安装。证书会
-显示为「复用已有」或「acme.sh 签发」。
+不带参数即可完成部署。脚本按下面的顺序执行，正常情况下只在打印摘要后停一次：
 
-### 2.2 执行
-
-```bash
-tools/deploy.sh --domain sub.example.com --profile-name DuskWander
-```
-
-默认每一步都会停下来确认。全参数加 `--yes` 可跳过确认，适合无人值守执行：
-
-```bash
-tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
-  --with-rules --yes
-```
-
-确认部署配置后，脚本会：
-
-1. 检查 root 和依赖命令（交互式下先问订阅域名与显示名；缺失时统一提示安装），再检查
-   x-ui 服务与数据库、443 入站、2096 监听、8443 端口和域名解析。
+1. 检查 root 权限，读取已安装的 `sub-manager`、`sub-rules.conf` 和 `sub-rules-sync` 里的
+   域名、证书目录、显示名、规则前缀和规则仓库，作为重装时的默认值。
+2. 检查依赖命令。缺失时列出对应 apt 包，确认后安装；依赖先装好，后面的域名推导才用得上
+   `sqlite3` 和 `openssl`。依赖齐全时不停顿。
+3. 推导域名：已安装配置 → 3x-ui 的 `subDomain` / `webDomain` → 3x-ui 记录的面板/订阅证书 →
+   `/root/cert` 下唯一的证书，都找不到时才询问。证书目录由域名推导。订阅显示名首次安装用
+   默认 `DuskWander87`，重装沿用已安装的值；需要改时用 `--profile-name`。
+4. 检查 x-ui 服务与数据库、443 入站、2096 监听、8443 端口和域名解析，并打印部署摘要。
    3x-ui 只读不写；443 入站或 2096 收口不符合预期时给出警告。
-2. 把 `server/` 复制到临时目录，替换域名、证书目录、显示名、规则前缀和规则仓库。
-3. 把要覆盖的文件备份到 `/root/sub-aggregator-backup-<时间戳>-<pid>/`。
-4. 安装 subconverter、管理脚本、systemd 单元、Nginx 片段、兜底缓存目录和 ACME 挑战路径。
-5. 重启 subconverter，校验并启动/重载 Nginx。
-6. 缺少证书时安装 acme.sh、用 webroot 签发到 `/root/cert/<域名>/`；已有 acme.sh 配置是
-   standalone 时改成 webroot，并确保续期后 reload Nginx（见 §2.4）。
-7. 如果加了 `--with-rules`，启用本机规则发布：规则仓库默认是作者的，工作副本不存在时
+5. 确认后备份到 `/root/sub-aggregator-backup-<时间戳>-<pid>/`，把 `server/` 复制到临时目录
+   并替换域名、证书目录、显示名、规则前缀和规则仓库。
+6. 安装 subconverter、管理脚本、systemd 单元、Nginx 片段、兜底缓存目录和 ACME 挑战路径；
+   重启 subconverter，校验并启动/重载 Nginx。
+7. 缺少证书时安装 acme.sh、用 webroot 向 Let's Encrypt 签发到 `/root/cert/<域名>/`；已有
+   acme.sh 配置是 standalone 时改成 webroot，并确保续期后 reload Nginx（见 §2.4）。签发
+   不需要邮箱，`--acme-email` 只是可选的联系邮箱。
+8. 如果加了 `--with-rules`，启用本机规则发布：规则仓库默认是作者的，工作副本不存在时
    自动克隆，然后启用同步定时器并跑一次 `sub-rules-check`。不加时 Clash 分支仍含规则表，
    两个自维护列表由服务端反代 GitHub 兜底。
-8. 打印 3x-ui 面板地址和建订阅的后续步骤。
+9. 验证 x-ui / subconverter / nginx 状态、转换后端响应和 `nginx -t`，打印 3x-ui 面板地址
+   和建订阅的后续步骤。验证不通过时给出警告、以非 0 退出，并明确说明哪一项没过；已安装的
+   文件保留。
 
 部署不创建订阅。订阅的前提是面板里已经有节点和客户端，这一步只能在面板里完成；脚本只
 把入口和命令打印出来，不打断安装，也不向 3x-ui 写入任何东西。
@@ -80,22 +69,39 @@ tools/deploy.sh --domain sub.example.com --profile-name DuskWander \
 脚本不会修改 3x-ui、Xray 或 443 入站，也不会改动你的仓库工作副本。2096 收口需要手工执行，
 见 §3.5。
 
+### 2.2 预演与无人值守
+
+只检查、不改任何文件：
+
+```bash
+tools/deploy.sh --dry-run
+```
+
+`--dry-run` 打印推导到的域名、证书状态、规则配置和缺失依赖，然后退出；它不安装依赖，
+也不签发证书。证书会显示为「复用已有」或「acme.sh 签发」。
+
+`--yes` 跳过确认，适合无人值守执行。依赖缺失时会直接安装；域名推导失败时必须同时给出
+`--domain`，否则非交互环境下无法继续。证书用 Let's Encrypt 签发，不需要邮箱：
+
+```bash
+tools/deploy.sh --domain sub.example.com --with-rules --yes
+```
+
 ### 2.3 参数
 
 | 参数 | 含义 |
 |---|---|
 | `--domain <域名>` | 订阅域名；省略时从 3x-ui 配置或证书推导 |
 | `--cert-dir <目录>` | 证书目录；默认自动查找，缺失时签发到 `/root/cert/<域名>` |
-| `--acme-email <邮箱>` | 首次安装 acme.sh 时注册账户用，可留空 |
+| `--acme-email <邮箱>` | 可选：安装 acme.sh 时写入 ACME 账户联系邮箱；不填也能签发 |
 | `--no-issue-cert` | 缺少证书时不自动签发，直接报错 |
 | `--profile-name <名称>` | 订阅显示名，纯 ASCII，默认 `DuskWander87` |
 | `--rules-prefix <hex>` | 规则端点前缀，默认随机生成 24 位 hex |
 | `--rules-repo <owner/repo>` | 规则仓库，默认 `DuskWander87/shadowrocket-config`；自定义时传 fork 的 owner/repo |
 | `--rules-workdir <目录>` | 规则仓库的本机 git 工作副本，默认 `/root/code/shadowrocket-config` |
 | `--with-rules` | 启用本机规则发布（克隆规则仓库并启动 `sub-rules-sync.timer`）；仓库默认是作者的 |
-| `--dry-run` | 只打印计划，不做修改 |
-| `--install-deps` | 只安装缺失的依赖命令，然后退出，不部署 |
-| `--yes` / `-y` | 跳过逐步确认；正式部署时依赖缺失直接安装 |
+| `--dry-run` | 只打印计划，不做修改；不安装依赖、不签发证书 |
+| `--yes` / `-y` | 跳过确认；依赖缺失时直接安装 |
 | `--rollback <备份目录>` | 从备份目录恢复 |
 
 重装时，脚本会从已安装的 `sub-manager`、`sub-rules.conf` 和 `sub-rules-sync` 里读取域名、
@@ -122,15 +128,19 @@ privkey.pem      # 私钥（0600）
 自动签发走 ACME HTTP-01：脚本安装 `/etc/nginx/conf.d/acme-challenge.conf`（监听 80，
 `server_name` 是订阅域名），acme.sh 以 `--webroot /var/www/acme` 写入挑战文件，签发 EC-256
 证书后用 `--install-cert` 落到证书目录，并设置续期后 `systemctl reload nginx`。要求域名的
-A/AAAA 记录指向本机、公网 80 端口可达。acme.sh 未安装时脚本从 `https://get.acme.sh` 安装，
-`--acme-email` 可指定注册邮箱（留空也能签发）。
+A/AAAA 记录指向本机、公网 80 端口可达。acme.sh 未安装时脚本从 `https://get.acme.sh` 安装。
 
-续期由 acme.sh 自带的 cron 任务执行，`acme.sh --list` 看下次时间。已有配置如果是 standalone
-（`Le_Webroot='no'`），脚本会改成 webroot，原文件保留为 `.conf.orig`：standalone 续期要独占
-80 端口，而 Nginx 已经占用 80。注意续期后 Nginx 必须 reload，否则它一直发旧证书；脚本会把
-`systemctl reload nginx` 追加到 acme.sh 原有的 reload hook 后面（3x-ui 自签的配置里通常已有
-`systemctl restart x-ui`）。如果之后在 3x-ui 面板里重新申请证书导致配置退回 standalone，重跑
-一次 `tools/deploy.sh` 即可。
+签发源固定为 **Let's Encrypt**（`--server letsencrypt`），不读本机 acme.sh 的默认 CA：上游
+默认是 ZeroSSL，注册账户需要邮箱，而 Let's Encrypt 不需要。`--acme-email` 只是可选的联系
+邮箱，填了会传给 acme.sh 的安装器，作为 ACME 账户的联系方式；不填也能签发。证书为什么必须
+续期、能不能不用 acme.sh，见 [certificates.md](certificates.md)。
+
+续期由 acme.sh 自带的 cron 任务执行，`/root/.acme.sh/acme.sh --list` 看下次时间。已有配置
+如果是 standalone（`Le_Webroot='no'`），脚本会改成 webroot，原文件保留为 `.conf.orig`：
+standalone 续期要独占 80 端口，而 Nginx 已经占用 80。注意续期后 Nginx 必须 reload，否则它
+一直发旧证书；面板或原生订阅的证书指向本证书目录时，脚本还会把 `systemctl restart x-ui`
+补进 hook（原来由 3x-ui 自己签发时通常已经有了）。如果之后在 3x-ui 面板里重新申请证书导致
+配置退回 standalone，重跑一次 `tools/deploy.sh` 即可。
 
 不想让脚本碰证书时加 `--no-issue-cert`：缺文件直接报错，已经存在的证书照常使用；脚本仍会
 修正 acme.sh 的续期方式，因为 Nginx 接管 80 端口后 standalone 续期必然失败。
@@ -194,8 +204,9 @@ nginx -t && systemctl reload nginx
 没有现成证书时用 acme.sh 签发（`acme.sh` 未安装先执行 `curl https://get.acme.sh | sh`）：
 
 ```bash
-acme.sh --issue -d sub.example.com --webroot /var/www/acme --keylength ec-256
-acme.sh --install-cert -d sub.example.com \
+/root/.acme.sh/acme.sh --issue -d sub.example.com --server letsencrypt \
+  --webroot /var/www/acme --keylength ec-256
+/root/.acme.sh/acme.sh --install-cert -d sub.example.com \
   --key-file /root/cert/sub.example.com/privkey.pem \
   --fullchain-file /root/cert/sub.example.com/fullchain.pem \
   --reloadcmd "systemctl reload nginx"
@@ -318,7 +329,7 @@ curl -fsS http://127.0.0.1:25500/version
 sub-manager list
 sub-manager test
 nginx -t
-acme.sh --list                                    # 用 acme.sh 签发时：证书与下次续期时间
+/root/.acme.sh/acme.sh --list                     # 用 acme.sh 签发时：证书与下次续期时间
 openssl x509 -in /root/cert/sub.example.com/fullchain.pem -noout -enddate
 ```
 
@@ -344,12 +355,12 @@ tools/uninstall.sh
 以下内容保持原样：
 
 - 3x-ui、Xray、`/etc/x-ui/x-ui.db`、443 与 2096：卸载脚本对 x-ui 零读写。
-- Nginx 包与运行中的进程：`deploy.sh` 只启动/重载 Nginx，是否由 `--install-deps` 安装无法
-  可靠判断，删包会连 `/etc/nginx` 的其它配置一起清掉。卸载只移除本服务的配置文件，
+- Nginx 包与运行中的进程：`deploy.sh` 只启动/重载 Nginx，是否由它安装无法可靠判断，删包
+  会连 `/etc/nginx` 的其它配置一起清掉。卸载只移除本服务的配置文件，
   `nginx -t` 通过后 reload。确认 Nginx 只为本项目安装时再手工 `apt purge nginx`。
 - 证书与 acme.sh，以及 `acme-challenge.conf` + `/var/www/acme`：后者是证书续期的 webroot
   链路，删掉会让续期静默失败。确定不再使用该证书时手工删除这两处，并执行
-  `acme.sh --remove -d <域名>`。
+  `/root/.acme.sh/acme.sh --remove -d <域名>`。
 - 规则仓库工作副本（默认 `/root/code/shadowrocket-config`）：git 仓库不属于安装产物。
 - `/etc/hosts` 的 `127.0.0.1 <订阅域名>` 映射：属于 §3.5 的手工步骤，脚本只报告、不修改。
 
@@ -371,9 +382,10 @@ tools/uninstall.sh
 - **证书签发失败**：确认域名的 A/AAAA 记录指向本机、公网 80 端口可达（安全组 / 防火墙），
   且 `nginx -t` 通过。Let's Encrypt 对同一域名有频率限制，失败后不要连续重试。已有证书想
   手动放置时用 `--cert-dir` 指定目录，或加 `--no-issue-cert` 让脚本只检查。
-- **续期失败**：`acme.sh --list` 看下次续期时间；确认 `/etc/nginx/conf.d/acme-challenge.conf`
-  生效（`nginx -T | grep -A5 acme-challenge`），且 Nginx worker 能读 `/var/www/acme`。原来由
-  3x-ui 用 standalone 签发的证书，重跑部署脚本会自动改成 webroot。
+- **续期失败**：`/root/.acme.sh/acme.sh --list` 看下次续期时间；确认
+  `/etc/nginx/conf.d/acme-challenge.conf` 生效（`nginx -T | grep -A5 acme-challenge`），且
+  Nginx worker 能读 `/var/www/acme`。原来由 3x-ui 用 standalone 签发的证书，重跑部署脚本会
+  自动改成 webroot。
 - **域名推导不对**：3x-ui 里配了多个证书或面板/订阅用了不同域名时，推导会停在第一个匹配项
   或退回询问。直接加 `--domain` 明确指定，不要依赖推导。
 - **`add --from-xui` 读不到数据库**：确认 `x-ui.service` 在运行、`sqlite3` 已安装、

@@ -42,18 +42,20 @@ flowchart LR
 
 ## 快速开始
 
-前提：一台跑着 3x-ui 的 Ubuntu 服务器，443 上有一个可用的 VLESS Reality 入站；一个指向它的域名和证书；root 权限和至少 2 GB 内存。
+前提：一台跑着 3x-ui 的 Ubuntu 服务器，443 上有一个可用的 VLESS Reality 入站；一个指向它的域名（缺证书时脚本自动签发）；root 权限和至少 2 GB 内存。
 
-在仓库根目录先看计划再应用：
+在仓库根目录执行一条命令：
 
 ```bash
 git clone https://github.com/DuskWander87/sub-aggregator.git
 cd sub-aggregator
-tools/deploy.sh --dry-run   # 只检查前提并打印计划，不改任何文件
-tools/deploy.sh             # 逐步确认后执行安装
+tools/deploy.sh
 ```
 
-脚本默认逐步确认，覆盖前先备份。参数、手动步骤、规则链和回滚见 [deploy.md](docs/sub/deploy.md)。
+脚本自动推导域名和证书（缺证书时用 Let's Encrypt 签发，续期由 acme.sh 自动完成，见
+[certificates.md](docs/sub/certificates.md)），缺失依赖会先确认安装；打印摘要后确认一次即
+完成部署，覆盖前先备份。想先预览加 `--dry-run`（只读，不改任何文件）。参数、手动步骤、
+规则链和回滚见 [deploy.md](docs/sub/deploy.md)。
 
 不想再用了就跑 `tools/uninstall.sh`。它会先打印计划再等确认，只删聚合层，3x-ui、节点、
 证书和 Nginx 本身不动。
@@ -80,7 +82,7 @@ systemctl restart subconverter && sub-manager resync
 
 ## 它不是什么
 
-- 不是无人值守的一键安装器，也不是带界面的管理面板。部署脚本会逐步确认，日常操作走 `sub-manager` 命令行。
+- 不是带界面的管理面板。部署脚本一条命令完成，默认打印摘要后确认一次；日常操作走 `sub-manager` 命令行。
 - 不修改 3x-ui、Xray 或 443 上的 VLESS Reality 入站。它只在旁边新增 Nginx 入口和一个只监听回环地址的 subconverter。
 - 不是多租户服务。每条订阅对应一个 3x-ui 客户端，没有账号体系，也没有配额。
 - 不提供高可用。单机、单 Nginx、单 subconverter，适合个人或小圈子。

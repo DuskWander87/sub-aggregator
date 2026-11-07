@@ -19,6 +19,7 @@
 | 文档 | 内容 | 什么时候读 | 编辑规律 |
 |---|---|---|---|
 | [deploy.md](deploy.md) | 从零部署与卸载：前提、脚本、手动步骤、备份与回滚 | 第一次安装、重装或卸载 | 与 `tools/deploy.sh`、`tools/uninstall.sh` 同步 |
+| [certificates.md](certificates.md) | 证书给谁用、为什么需要 acme.sh、续期链路与故障判断 | 「证书会不会过期」「acme.sh 是干嘛的」 | 与 `tools/deploy.sh` 的签发流程同步 |
 | [operations.md](operations.md) | 管理脚本、编号与轮换、检查与验证、备份范围 | 要动手做某件事 | 保持精简，不留历史 |
 | [unified-subscription.md](unified-subscription.md) | 订阅入口：UA 分流规则、两个分支的输出、2096 收口 | 给设备配订阅、或要改分流规则 | §2 判定规则是**单一事实源** |
 | [design.md](design.md) | 环境、选型、配置、安全模型、策略组 / DNS / 规则分发设计 | 要改系统，需要先知道为什么是现在这样 | 改服务器必须同步改 |
@@ -98,6 +99,7 @@ SNI/fallback 分流。代价是 Clash 客户端会显示 `sub.example.com:8443`�
 /var/lib/sub-rules/                     # 发布目录，nginx 直接 serve（0755，文件 0644）
 /opt/subconverter-classic/              # 转换后端（pref.ini / base/ / snippets/）
 /root/cert/sub.example.com/             # Let's Encrypt 证书（acme.sh webroot 续期）
+/root/.acme.sh/                         # acme.sh 本体、账户与续期配置（root crontab 每日调用）
 /var/www/acme/                          # ACME webroot（acme.sh 写入，Nginx 读取）
 /etc/hosts                              # 订阅域名 → 127.0.0.1，供 subconverter 拉取原始订阅
 /etc/x-ui/x-ui.db                       # 3x-ui 数据库

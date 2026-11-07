@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# sub-aggregator 首次部署脚本。
+# sub-aggregator 部署脚本。
 #
-# 唯一实现，部署只走这份脚本。默认逐步确认；--dry-run 只打印计划，
-# 不做任何修改；--yes 跳过逐步确认。所有替换都在临时目录里完成，
-# 不会改动仓库工作副本。
+# 唯一实现，部署只走这份脚本。不带参数即可：自动推导配置、安装缺失依赖、
+# 打印摘要确认一次后执行。--dry-run 只打印计划，不做任何修改；--yes 跳过确认。
+# 所有替换都在临时目录里完成，不会改动仓库工作副本。
 set -Eeuo pipefail
 umask 077
 
@@ -33,6 +33,7 @@ readonly OPT_DIR="/opt/subconverter-classic"
 readonly PUBLISH_DIR="/var/lib/sub-rules"
 readonly DEFAULT_RULES_WORKDIR="/root/code/shadowrocket-config"
 readonly DEFAULT_RULES_REPO="DuskWander87/shadowrocket-config"
+readonly DEFAULT_PROFILE_NAME="DuskWander87"
 readonly SUBCONVERTER_VERSION="v0.9.9"
 readonly SUBCONVERTER_URL="https://github.com/asdlokj1qpi233/subconverter/releases/download/${SUBCONVERTER_VERSION}/subconverter_linux64.tar.gz"
 
@@ -41,6 +42,9 @@ readonly DEFAULT_CERT_ROOT="/root/cert"
 readonly ACME_HOME="/root/.acme.sh"
 readonly ACME_WEBROOT="/var/www/acme"
 readonly ACME_NGINX_CONF="$NGINX_CONF_D_DIR/acme-challenge.conf"
+# 签发源固定为 Let's Encrypt，不依赖本机 acme.sh 的默认 CA。上游默认是 ZeroSSL，
+# 注册账户需要邮箱；固定 CA 后签发不再需要邮箱。
+readonly ACME_CA_SERVER="letsencrypt"
 
 DOMAIN=""
 DOMAIN_CANDIDATE=""
@@ -54,7 +58,6 @@ ACME_EMAIL=""
 WITH_RULES=0
 DRY_RUN=0
 ASSUME_YES=0
-INSTALL_DEPS_ONLY=0
 ISSUE_CERT=1
 CERT_NEEDS_ISSUE=0
 ROLLBACK_DIR=""
@@ -67,10 +70,13 @@ usage() {
 用法：
   deploy.sh [选项]
 
+不带参数即可部署：自动推导域名与证书、安装缺失的依赖，打印摘要后确认一次。
+只询问无法自动推导的域名。
+
 选项：
   --domain <域名>           订阅域名；省略时从 3x-ui 配置或证书自动推导
   --cert-dir <目录>         证书目录；默认自动查找，缺失时签发到 /root/cert/<域名>
-  --acme-email <邮箱>       首次安装 acme.sh 时注册账户用，可留空
+  --acme-email <邮箱>       可选：安装 acme.sh 时写入 ACME 账户联系邮箱
   --no-issue-cert           缺少证书时不自动签发，直接报错
   --profile-name <名称>     订阅显示名，纯 ASCII（默认 DuskWander87）
   --rules-prefix <hex>      规则端点前缀，默认随机生成 24 位 hex
@@ -78,12 +84,9 @@ usage() {
   --rules-workdir <目录>    规则仓库本机工作副本，默认 /root/code/shadowrocket-config
   --with-rules              启用本机规则发布；规则仓库默认是作者的
   --dry-run                 只打印计划，不做修改
-  --install-deps            只安装缺失的依赖命令，然后退出
-  --yes, -y                 跳过逐步确认；依赖缺失时直接安装
+  --yes, -y                 跳过确认；依赖缺失时直接安装
   --rollback <备份目录>     从备份目录恢复
   -h, --help                显示这份帮助
-
-不带参数时逐项询问缺少的值。
 EOF
 }
 
@@ -123,7 +126,6 @@ parse_args() {
             --rules-workdir) opt_value "$@"; RULES_WORKDIR=$2; shift 2 ;;
             --with-rules) WITH_RULES=1; shift ;;
             --dry-run) DRY_RUN=1; shift ;;
-            --install-deps) INSTALL_DEPS_ONLY=1; shift ;;
             --yes|-y) ASSUME_YES=1; shift ;;
             --rollback) opt_value "$@"; ROLLBACK_DIR=$2; shift 2 ;;
             -h|--help) usage; exit 0 ;;
@@ -327,26 +329,25 @@ resolve_cert_dir() {
     log "证书：未找到，将用 acme.sh 签发到 $CERT_DIR"
 }
 
-prompt_acme_email() {
-    # 邮箱只在首次安装 acme.sh 时用到；已经装好的账户可以留空。
-    [[ $CERT_NEEDS_ISSUE -eq 1 ]] || return 0
-    if [[ -n $ACME_EMAIL || -x "$ACME_HOME/acme.sh" || ! -t 0 ]]; then
-        return 0
-    fi
-    local value
-    printf '用于注册 ACME 账户的邮箱（可留空）: ' >&2
-    IFS= read -r value
-    ACME_EMAIL=$value
-}
-
 prompt_values() {
+    # 只问推导不到的域名。显示名、规则前缀和规则仓库都有默认值。
     prompt_value DOMAIN "订阅域名" ""
-    prompt_value PROFILE_NAME "订阅显示名，纯 ASCII" "DuskWander87"
 }
 
 fill_defaults() {
-    # openssl 可能刚由 ensure_dependencies 装上，所以放在依赖处理之后。
-    [[ -n $RULES_PREFIX ]] || RULES_PREFIX=$(openssl rand -hex 12)
+    # openssl 可能刚由 install_dependencies 装上，所以放在依赖处理之后。
+    [[ -n $PROFILE_NAME ]] || PROFILE_NAME=$DEFAULT_PROFILE_NAME
+    if [[ -z $RULES_PREFIX ]]; then
+        if have openssl; then
+            RULES_PREFIX=$(openssl rand -hex 12)
+        elif [[ $DRY_RUN -eq 1 ]]; then
+            # dry-run 不装依赖，用一个合法的占位值把计划打印完。
+            RULES_PREFIX="0123456789abcdef01234567"
+            warn "缺少 openssl：dry-run 用占位规则前缀；正式部署会随机生成。"
+        else
+            fail "缺少 openssl，无法生成规则前缀。"
+        fi
+    fi
     [[ -n $RULES_REPO ]] || RULES_REPO=$DEFAULT_RULES_REPO
 }
 
@@ -461,31 +462,20 @@ collect_missing_dependencies() {
     ((${#MISSING_COMMANDS[@]} > 0))
 }
 
-ensure_dependencies() {
-    collect_missing_dependencies || return 0
+print_missing_dependencies() {
+    log "部署前需要安装依赖："
+    log "  命令：${MISSING_COMMANDS[*]}"
+    log "  apt 包：${MISSING_PACKAGES[*]}"
+}
+
+# 安装 collect_missing_dependencies 收集到的包。确认由调用方负责。
+install_dependencies() {
+    ((${#MISSING_PACKAGES[@]} > 0)) || return 0
 
     local cmd still=()
-    local cmd_list="${MISSING_COMMANDS[*]}"
-    local pkg_list="${MISSING_PACKAGES[*]}"
-
-    warn "缺少依赖命令：$cmd_list（对应包：$pkg_list）"
-
-    # dry-run 只读：只报告，不安装。安装走独立的 --install-deps。
-    if [[ $DRY_RUN -eq 1 ]]; then
-        printf '    安装：%s --install-deps\n' "${BASH_SOURCE[0]}" >&2
-        return 0
-    fi
-
-    if [[ $ASSUME_YES -eq 0 && ! -t 0 ]]; then
-        fail "当前不是交互式终端，无法确认安装。手工执行：apt-get update && apt-get install -y $pkg_list（或加 --yes 自动安装）"
-    fi
-    if ! confirm "现在安装依赖？"; then
-        fail "未安装依赖。手工执行：apt-get update && apt-get install -y $pkg_list"
-    fi
-
     log "运行 apt-get update"
     apt-get update
-    log "安装：$pkg_list"
+    log "安装：${MISSING_PACKAGES[*]}"
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${MISSING_PACKAGES[@]}"
 
     for cmd in "${MISSING_COMMANDS[@]}"; do
@@ -493,6 +483,8 @@ ensure_dependencies() {
     done
     ((${#still[@]} == 0)) || fail "安装后仍缺少命令：${still[*]}"
     log "依赖已就绪。"
+    MISSING_COMMANDS=()
+    MISSING_PACKAGES=()
 }
 
 preflight() {
@@ -613,12 +605,15 @@ init_targets() {
 }
 
 print_plan() {
-    local repo_display=$RULES_REPO cert_state
+    local repo_display=$RULES_REPO cert_state dep_state="已就绪"
     if [[ $CERT_NEEDS_ISSUE -eq 1 ]]; then
         cert_state="acme.sh 签发（webroot $ACME_WEBROOT）"
         [[ -x "$ACME_HOME/acme.sh" ]] || cert_state+="，需先安装 acme.sh"
     else
         cert_state="复用已有证书"
+    fi
+    if ((${#MISSING_COMMANDS[@]} > 0)); then
+        dep_state="缺少 ${MISSING_COMMANDS[*]}（正式部署时安装：${MISSING_PACKAGES[*]}）"
     fi
     cat <<EOF
 部署计划
@@ -626,6 +621,7 @@ print_plan() {
   域名:           $DOMAIN
   证书目录:       $CERT_DIR
   证书:           $cert_state
+  依赖:           $dep_state
   订阅显示名:     $PROFILE_NAME
   规则端点前缀:   $RULES_PREFIX
   规则仓库:       $repo_display
@@ -819,13 +815,33 @@ set_acme_reloadcmd() {
     fi
 }
 
-# 续期 hook 必须包含 reload nginx，同时保留原有的 hook（3x-ui 自签的配置里
-# 是 systemctl restart x-ui）。
+# 面板/原生订阅是否把证书指向本脚本安装的目录。是的话续期后必须重启 x-ui，
+# 否则它继续用内存里的旧证书。读不到设置时按「在用」处理：多一次重启，
+# 好过面板继续发旧证书。
+xui_uses_cert_dir() {
+    local key path
+    for key in webCertFile subCertFile; do
+        if path=$(xui_setting "$key"); then
+            [[ -n $path ]] || continue
+            [[ $(dirname -- "${path%/}") == "$CERT_DIR" ]] && return 0
+        else
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 续期 hook 必须包含 reload nginx；面板/原生订阅也用这张证书时还要重启 x-ui。
+# 两者都保留原有的 hook（3x-ui 自签的配置里通常已有 systemctl restart x-ui）。
 acme_reload_cmd() {
     local conf cmd=""
     if conf=$(acme_conf_file "$DOMAIN"); then
         cmd=$(sed -n "s/^Le_ReloadCmd='\(.*\)'$/\1/p" "$conf" | head -n 1)
         cmd=$(decode_acme_value "$cmd")
+    fi
+    if xui_uses_cert_dir; then
+        [[ $cmd == *"restart x-ui"* ]] \
+            || cmd="systemctl restart x-ui || rc-service x-ui restart${cmd:+; $cmd}"
     fi
     [[ $cmd == *"reload nginx"* ]] || cmd="${cmd:+$cmd; }systemctl reload nginx"
     printf '%s\n' "$cmd"
@@ -868,9 +884,19 @@ issue_cert() {
 
     # deploy.sh 的 umask 是 077。acme.sh 写挑战文件时会继承它，nginx worker
     # 就读不到；签发阶段单独放回 022。
-    if ! ( umask 022; "$ACME_HOME/acme.sh" --issue -d "$DOMAIN" \
-            --webroot "$ACME_WEBROOT" --keylength ec-256 ); then
-        fail "acme.sh 签发失败。确认 $DOMAIN 已解析到本机、公网 80 端口可达。"
+    local rc=0
+    ( umask 022; "$ACME_HOME/acme.sh" --issue -d "$DOMAIN" \
+        --server "$ACME_CA_SERVER" \
+        --webroot "$ACME_WEBROOT" --keylength ec-256 ) || rc=$?
+    # acme.sh 在证书仍在有效期内、未到续期时间时返回 2（RENEW_SKIP）。例如证书目录
+    # 换了位置，或 acme.sh 里已有一张同域名的有效证书：继续走 --install-cert 重新
+    # 落盘即可，不能当成签发失败。安装副本被删时要先按 certificates.md §4 手工恢复，
+    # 否则 install_files 会先停在 nginx -t。
+    if (( rc != 0 && rc != 2 )); then
+        fail "acme.sh 签发失败（退出码 $rc）。确认 $DOMAIN 已解析到本机、公网 80 端口可达。"
+    fi
+    if (( rc == 2 )); then
+        log "证书仍在 acme.sh 的存储里且未到续期时间，跳过签发，直接重新安装。"
     fi
     "$ACME_HOME/acme.sh" --install-cert -d "$DOMAIN" \
         --key-file "$CERT_DIR/privkey.pem" \
@@ -878,8 +904,8 @@ issue_cert() {
         --reloadcmd "$(acme_reload_cmd)" \
         || fail "acme.sh install-cert 失败。"
     chmod 0600 "$CERT_DIR/privkey.pem"
-    cert_files_ok "$CERT_DIR" || fail "签发后仍找不到证书文件：$CERT_DIR"
-    log "证书：已签发到 $CERT_DIR"
+    cert_files_ok "$CERT_DIR" || fail "安装后仍找不到证书文件：$CERT_DIR"
+    log "证书：已安装到 $CERT_DIR"
 }
 
 install_files() {
@@ -947,14 +973,44 @@ install_files() {
     fi
 }
 
+# 部署后的健康检查。与 uninstall 的 verify 对称：只报告，不修改。
+verify_deploy() {
+    local failed=0 svc
+    for svc in x-ui subconverter nginx; do
+        if systemctl is-active --quiet "$svc"; then
+            log "  ✓ $svc 运行中"
+        else
+            warn "$svc 未运行。"
+            failed=1
+        fi
+    done
+    if curl -fsS --max-time 5 http://127.0.0.1:25500/version >/dev/null 2>&1; then
+        log "  ✓ 转换后端 127.0.0.1:25500 响应正常"
+    else
+        warn "转换后端未响应；查看 journalctl -u subconverter -n 50。"
+        failed=1
+    fi
+    if nginx -t >/dev/null 2>&1; then
+        log "  ✓ nginx -t 通过"
+    else
+        warn "nginx -t 未通过。"
+        failed=1
+    fi
+    return "$failed"
+}
+
 # 部署只安装聚合层，不碰 3x-ui，也不替用户创建订阅：订阅的前提是面板里已经有
 # 节点和客户端，而这只能在面板里完成。把面板入口和后续命令一次打印出来。
 print_next_steps() {
-    local panel_url=""
+    local verify_ok=${1:-0} panel_url=""
     panel_url=$(xui_panel_url 2>/dev/null) || panel_url=""
 
     log ""
-    log "完成。备份在 $BACKUP_DIR。"
+    if (( verify_ok == 0 )); then
+        log "部署完成，验证通过。备份在 $BACKUP_DIR。"
+    else
+        warn "部署完成，但有验证项未通过（见上方警告）。备份在 $BACKUP_DIR。"
+    fi
     log "回滚：$REPO_ROOT/tools/deploy.sh --rollback $BACKUP_DIR"
     log ""
     log "下一步：在 3x-ui 面板里创建节点和客户端"
@@ -1025,10 +1081,6 @@ main() {
 
     [[ -d "$REPO_ROOT/server" ]] || fail "找不到仓库根目录：$REPO_ROOT"
 
-    if [[ $INSTALL_DEPS_ONLY -eq 1 && $DRY_RUN -eq 1 ]]; then
-        fail "--install-deps 会安装软件包，不能与 --dry-run 同用。"
-    fi
-
     if [[ -n $ROLLBACK_DIR ]]; then
         require_root
         do_rollback
@@ -1037,35 +1089,29 @@ main() {
 
     require_root
 
-    if [[ $INSTALL_DEPS_ONLY -eq 1 ]]; then
-        if collect_missing_dependencies; then
-            ensure_dependencies
-        else
-            log "依赖已就绪。"
-        fi
-        return 0
-    fi
-
-    # 交互式下先问订阅相关的值，再处理依赖，避免安装提示打断提问流程；无人值守时
-    # 依赖必须先装好，否则域名可能无法从 x-ui.db 推导。
-    local defer_deps=0
-    if [[ -t 0 ]]; then
-        defer_deps=1
-    else
-        ensure_dependencies
-    fi
-
     detect_existing_values
+
+    local deps_missing=0
+    collect_missing_dependencies && deps_missing=1
+
+    # 先装依赖，后面的推导才用得上（缺 sqlite3 时域名推导会失败）。
+    # dry-run 只报告，不安装。
+    if [[ $DRY_RUN -eq 0 && $deps_missing -eq 1 ]]; then
+        if [[ $ASSUME_YES -eq 0 && ! -t 0 ]]; then
+            fail "缺少依赖命令：${MISSING_COMMANDS[*]}（对应包：${MISSING_PACKAGES[*]}）。手工执行：apt-get update && apt-get install -y ${MISSING_PACKAGES[*]}，或加 --yes 自动安装。"
+        fi
+        print_missing_dependencies
+        if ! confirm "安装以上依赖？"; then
+            log "已取消。手工安装依赖：apt-get update && apt-get install -y ${MISSING_PACKAGES[*]}"
+            return 0
+        fi
+        install_dependencies
+    fi
+
     detect_domain
     prompt_values
-
-    if [[ $defer_deps -eq 1 ]]; then
-        ensure_dependencies
-    fi
-    fill_defaults
-
     resolve_cert_dir
-    prompt_acme_email
+    fill_defaults
     validate_values
     preflight
 
@@ -1085,7 +1131,13 @@ main() {
     stage
     install_files
     setup_rules
-    print_next_steps
+
+    local verify_ok=0
+    log ""
+    log "验证："
+    verify_deploy || verify_ok=1
+    print_next_steps "$verify_ok"
+    exit "$verify_ok"
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

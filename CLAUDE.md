@@ -19,6 +19,7 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 |---|---|---|---|
 | `docs/sub/README.md` | 索引、架构、端口/路径/`CONVERT_OPTS` 速查 | 找入口、查常量 | §3 是**单一事实源** |
 | `docs/sub/deploy.md` | 从零部署与卸载：前提、脚本、手动步骤、备份与回滚 | 第一次安装、重装或卸载 | 与 `tools/deploy.sh`、`tools/uninstall.sh` 保持同步 |
+| `docs/sub/certificates.md` | 证书给谁用、为什么需要 acme.sh、续期链路与故障判断 | 「证书会不会过期」「acme.sh 是干嘛的」 | 与 `tools/deploy.sh` 的签发流程同步 |
 | `docs/sub/operations.md` | 管理脚本、编号与轮换、检查与验证、备份范围 | 要动手做某件事 | 保持精简 |
 | `docs/sub/unified-subscription.md` | 订阅入口：UA 分流规则、两个分支的输出、2096 收口 | 给设备配订阅、要改分流规则 | §2 判定规则是**单一事实源** |
 | `docs/sub/design.md` | 环境、选型、配置、安全模型、策略组 / DNS / 规则分发设计 | 要改系统，需先知道为什么是现在这样 | 改服务器必须同步改 |
@@ -71,6 +72,7 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 /var/lib/sub-rules/                     # 发布目录，nginx 直接 serve（0755，文件 0644）
 /opt/subconverter-classic/              # 转换后端（pref.ini / base/ / snippets/）
 /root/cert/sub.example.com/             # Let's Encrypt 证书（acme.sh webroot 续期）
+/root/.acme.sh/                         # acme.sh 本体、账户与续期配置（root crontab 每日调用）
 /var/www/acme/                          # ACME webroot（acme.sh 写入，Nginx 读取）
 /etc/hosts                              # 订阅域名 → 127.0.0.1，供 subconverter 拉取原始订阅
 /etc/x-ui/x-ui.db                       # 3x-ui 数据库
@@ -104,11 +106,12 @@ README §3.1。
 
 ## 关键操作
 
-首次部署走 `tools/deploy.sh`，先 `--dry-run` 看计划，再执行。它只负责安装，日常订阅管理仍走
-`sub-manager`：
+首次部署走 `tools/deploy.sh`，一条命令完成：自动推导域名与证书；依赖缺失时先确认安装，然后
+打印摘要确认一次。`--dry-run` 只预览。它只负责安装，日常订阅管理仍走 `sub-manager`：
 
 ```bash
-tools/deploy.sh --dry-run       # 预览首次部署（仓库工具，不装到真机）
+tools/deploy.sh                 # 一条命令部署（仓库工具，不装到真机）
+tools/deploy.sh --dry-run       # 只预览，不改任何文件
 tools/uninstall.sh              # 卸载聚合层；先打印计划再确认，不碰 3x-ui、证书与 Nginx
 ```
 
@@ -183,7 +186,10 @@ nginx -t
 - **证书续期走 80 端口 webroot**：`acme-challenge.conf` 与 `/var/www/acme` 是续期链路的一部分；
   `sub-manager` 只读 `/root/cert/<域名>/` 的 `fullchain.pem` / `privkey.pem`，不参与签发。
   acme.sh 的 reload hook 必须包含 `systemctl reload nginx`，否则续期后 Nginx 继续发旧证书，
-  旧证书到期后订阅入口开始报错。
+  旧证书到期后订阅入口开始报错；面板或订阅证书指向同一目录时还要重启 x-ui，`deploy.sh`
+  会自动补上。签发固定用 Let's Encrypt（`--server letsencrypt`），不依赖
+  本机 acme.sh 的默认 CA（上游默认 ZeroSSL，注册需要邮箱）。这条证书同时被面板、2096 和
+  8443 使用，不能只当作订阅入口的附属品；机制与故障判断见 `docs/sub/certificates.md`。
 - **读 `x-ui.db` 要区分「空」与「失败」**：库是 `journal_mode=delete`，写事务会阻塞读，坏读
   返回空结果；所有查询带 `-cmd '.timeout 3000'`，并同时检查退出码和结果非空。把空当成
   「没有客户端」会得到「无漂移」的错误结论。incidents `2026-08-22 读 x-ui.db 偶发返回空`
