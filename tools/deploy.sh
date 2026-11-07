@@ -296,6 +296,16 @@ acme_installed_paths() {
     dirname -- "$full"
 }
 
+# 现有证书的签发源是否为 Let's Encrypt。acme.sh 在证书未到期时直接返回
+# RENEW_SKIP（2），不比较 --server；后续 renew 也只认 conf 里的 Le_API。
+# 换 CA 必须自己判断并用 --force 重签，否则证书和续期都会留在旧 CA。
+acme_cert_is_letsencrypt() {
+    local conf api
+    conf=$(acme_conf_file "$DOMAIN") || return 1
+    api=$(sed -n "s/^Le_API='\(.*\)'$/\1/p" "$conf" | head -n 1)
+    [[ $api == *"acme-v02.api.letsencrypt.org"* ]]
+}
+
 # 证书目录从域名推导，不再向用户提问。查找顺序：默认目录 → certbot → acme.sh 安装记录，
 # 都没有时签发到默认目录。--cert-dir 仍然可以覆盖。
 resolve_cert_dir() {
@@ -888,10 +898,21 @@ issue_cert() {
     ( umask 022; "$ACME_HOME/acme.sh" --issue -d "$DOMAIN" \
         --server "$ACME_CA_SERVER" \
         --webroot "$ACME_WEBROOT" --keylength ec-256 ) || rc=$?
-    # acme.sh 在证书仍在有效期内、未到续期时间时返回 2（RENEW_SKIP）。例如证书目录
-    # 换了位置，或 acme.sh 里已有一张同域名的有效证书：继续走 --install-cert 重新
-    # 落盘即可，不能当成签发失败。安装副本被删时要先按 certificates.md §4 手工恢复，
-    # 否则 install_files 会先停在 nginx -t。
+
+    # acme.sh 在证书仍在有效期内、未到续期时间时返回 2（RENEW_SKIP），直接复用，
+    # 不比较 CA。已有证书不是 Let's Encrypt 时必须 --force 重签：否则 --server 对
+    # 这张证书不生效，后续 cron 续期也会继续用旧 CA（renew 只读 conf 里的 Le_API）。
+    if (( rc == 2 )) && ! acme_cert_is_letsencrypt; then
+        log "现有证书不是 Let's Encrypt 签发，强制重签。"
+        rc=0
+        ( umask 022; "$ACME_HOME/acme.sh" --issue -d "$DOMAIN" \
+            --server "$ACME_CA_SERVER" --force \
+            --webroot "$ACME_WEBROOT" --keylength ec-256 ) || rc=$?
+    fi
+
+    # 这个分支只在首次部署且 acme.sh 里已有一张有效证书时可达；已有部署的安装副本
+    # 缺失会先被 preflight 拦下，按 certificates.md §4 手工恢复。签发成功或跳过都
+    # 要继续走 --install-cert 落盘，不能当成失败。
     if (( rc != 0 && rc != 2 )); then
         fail "acme.sh 签发失败（退出码 $rc）。确认 $DOMAIN 已解析到本机、公网 80 端口可达。"
     fi

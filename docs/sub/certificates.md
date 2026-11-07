@@ -19,6 +19,11 @@ HTTPS 除了加密，还要向客户端证明「你连的确实是这个域名�
 
 所以它不是一个「只有聚合层用」的附属文件。换掉或弄丢它，面板和 2096 也会一起出问题。
 
+面板和原生订阅的这四处设置不由 `deploy.sh` 写入（脚本对 3x-ui 零写操作）。首次部署时在
+3x-ui 面板里把 `webCertFile` / `webKeyFile` 和 `subCertFile` / `subKeyFile` 指到
+`/root/cert/<域名>/fullchain.pem` 和 `privkey.pem`；改完再跑一次 `deploy.sh`，续期 hook
+才会补上 `systemctl restart x-ui`（hook 按部署当时的面板设置生成，见 §2.2）。
+
 为什么不能用自签名证书：浏览器和客户端默认不信任它。而且不只是外部客户端——服务器内部的
 subconverter 和 `sub-manager` 通过回环地址访问 `https://<域名>:2096` 时同样校验证书链，
 自签名证书和私有 CA 都会让这条内部链路失败。
@@ -45,7 +50,9 @@ acme.sh --issue
 
 挑战文件由 Nginx 的 `acme-challenge.conf` 提供，所以这件事要求：**域名的 A/AAAA 记录指向
 本机，且公网 80 端口可达**。签发源固定为 Let's Encrypt（`tools/deploy.sh` 里的
-`--server letsencrypt`），因此不需要邮箱，也不受本机 acme.sh 默认 CA 的影响。
+`--server letsencrypt`），因此不需要邮箱，也不受本机 acme.sh 默认 CA 的影响。acme.sh 里
+已有一张有效证书时默认会直接复用；如果那张证书不是 Let's Encrypt 签发，脚本会强制重签
+一次，让证书和后续续期都落到这个 CA 上。
 
 ### 2.2 续期是怎么自动发生的
 
@@ -113,8 +120,9 @@ systemctl is-active x-ui nginx subconverter        # 使用证书的服务
 ```
 
 这一步要在重跑 `deploy.sh` 之前做：已有部署的 `/etc/nginx/conf.d/private-sub.conf` 仍引用
-缺失的文件，直接重跑会先停在 `nginx -t`。恢复时 `systemctl reload nginx` 可能因为配置尚未
-通过校验而报错，文件已经落盘，忽略后重跑 `deploy.sh` 即可。`--install-cert` 会覆盖
+缺失的文件，直接重跑会先在 preflight 被拒绝（「现有 private-sub.conf 引用的证书缺失」）。
+恢复时 `systemctl reload nginx` 可能因为配置尚未通过校验而报错，文件已经落盘，忽略后重跑
+`deploy.sh` 即可。`--install-cert` 会覆盖
 acme.sh 里保存的 reload hook，所以这里按 §2.2 把两行完整写回。
 
 `/etc/hosts` 把订阅域名指到 `127.0.0.1` 不会影响签发：Let's Encrypt 从公网解析域名，不看
