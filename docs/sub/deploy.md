@@ -45,8 +45,9 @@ tools/deploy.sh
 2. 检查依赖命令。缺失时列出对应 apt 包，确认后安装；依赖先装好，后面的域名推导才用得上
    `sqlite3` 和 `openssl`。依赖齐全时不停顿。
 3. 推导域名：已安装配置 → 3x-ui 的 `subDomain` / `webDomain` → 3x-ui 记录的面板/订阅证书 →
-   `/root/cert` 下唯一的证书，都找不到时才询问。证书目录由域名推导。订阅显示名首次安装用
-   默认 `DuskWander87`，重装沿用已安装的值；需要改时用 `--profile-name`。
+   `/root/cert` 下唯一的证书，都找不到时才询问。证书目录由域名推导；改用不同的域名时，不沿用
+   旧证书目录，摘要会标出域名变更。订阅显示名首次安装用默认 `DuskWander87`，重装沿用已安装
+   的值；需要改时用 `--profile-name`。
 4. 检查 x-ui 服务与数据库、443 入站、2096 监听、8443 端口和域名解析，并打印部署摘要。
    3x-ui 只读不写；443 入站或 2096 收口不符合预期时给出警告。
 5. 确认后备份到 `/root/sub-aggregator-backup-<时间戳>-<pid>/`，把 `server/` 复制到临时目录
@@ -59,7 +60,8 @@ tools/deploy.sh
 8. 如果加了 `--with-rules`，启用本机规则发布：规则仓库默认是作者的，工作副本不存在时
    自动克隆，然后启用同步定时器并跑一次 `sub-rules-check`。不加时 Clash 分支仍含规则表，
    两个自维护列表由服务端反代 GitHub 兜底。
-9. 验证 x-ui / subconverter / nginx 状态、转换后端响应和 `nginx -t`，打印 3x-ui 面板地址
+9. 验证 x-ui / subconverter / nginx 状态、转换后端响应和 `nginx -t`，有订阅时检查 8443 入口，
+   打印 3x-ui 面板地址
    和建订阅的后续步骤。验证不通过时给出警告、以非 0 退出，并明确说明哪一项没过；已安装的
    文件保留。
 
@@ -124,6 +126,8 @@ privkey.pem      # 私钥（0600）
 3. `/etc/letsencrypt/live/<域名>/`（certbot）。
 4. acme.sh 的 `install-cert` 记录。
 5. 都没有时自动签发到 `/root/cert/<域名>/`。
+
+复用的证书必须覆盖订阅域名，否则脚本在做任何改动之前就报错。
 
 自动签发走 ACME HTTP-01：脚本安装 `/etc/nginx/conf.d/acme-challenge.conf`（监听 80，
 `server_name` 是订阅域名），acme.sh 以 `--webroot /var/www/acme` 写入挑战文件，签发 EC-256
@@ -391,6 +395,10 @@ tools/uninstall.sh
   `/etc/nginx/conf.d/acme-challenge.conf` 生效（`nginx -T | grep -A5 acme-challenge`），且
   Nginx worker 能读 `/var/www/acme`。续期方式不是 webroot 时重跑部署脚本，按
   [certificates.md](certificates.md) §2.2 对齐。
+- **改域名**：`--domain <新域名>` 重装时，所有设备的订阅地址都要换成新域名重新配置；脚本在
+  摘要里标出域名变更，并为新域名找证书或签发。`acme-challenge.conf` 只为新域名提供挑战路径，
+  旧域名的证书如果仍由 acme.sh webroot 续期（例如面板还在用），续期会失败：把面板也换到新
+  域名的证书，或改用别的续期方式。
 - **域名推导不对**：3x-ui 里配了多个证书或面板/订阅用了不同域名时，推导会停在第一个匹配项
   或退回询问。直接加 `--domain` 明确指定，不要依赖推导。
 - **`add --from-xui` 读不到数据库**：确认 `x-ui.service` 在运行、`sqlite3` 已安装、

@@ -31,6 +31,8 @@ readonly NGINX_SNIPPETS_DIR="/etc/nginx/snippets"
 readonly NGINX_CONF_D_DIR="/etc/nginx/conf.d"
 readonly OPT_DIR="/opt/subconverter-classic"
 readonly PUBLISH_DIR="/var/lib/sub-rules"
+# 订阅状态。与 README §3.2、sub-manager 的 STATE_FILE 是同一个路径；deploy 只读它。
+readonly STATE_FILE="/etc/sub-manager/clients.json"
 readonly DEFAULT_RULES_WORKDIR="/root/code/shadowrocket-config"
 readonly DEFAULT_RULES_REPO="DuskWander87/shadowrocket-config"
 readonly DEFAULT_PROFILE_NAME="DuskWander87"
@@ -78,6 +80,9 @@ ACME_NORMALIZED=0
 XUI_CERT_USAGE=""
 # 本次换了证书文件、而 x-ui 也用这张证书：部署结束时提示手工重启 x-ui。
 XUI_RESTART_NOTE=0
+# 订阅条数（count_subscriptions）；已安装的域名与本次不同时记下旧域名。
+SUB_COUNT=0
+DOMAIN_CHANGED_FROM=""
 
 usage() {
     cat <<'EOF'
@@ -177,13 +182,19 @@ prompt_value() {
 }
 
 detect_existing_values() {
-    # 重装时复用已安装的值，避免静默换掉规则前缀或域名。
-    if [[ -z $DOMAIN && -r "$SBIN_DIR/sub-manager" ]]; then
-        DOMAIN=$(sed -n 's/^readonly HOST="\(.*\)"$/\1/p' "$SBIN_DIR/sub-manager" | head -n 1)
-    fi
-    if [[ -z $CERT_DIR && -r "$SBIN_DIR/sub-manager" ]]; then
-        CERT_DIR=$(sed -n 's|^readonly CERT_FILE="\(.*\)/fullchain.pem"$|\1|p' \
+    # 重装时复用已安装的值，避免静默换掉规则前缀或域名。--domain 换了域名时不沿用
+    # 旧证书目录：那张证书不覆盖新域名。
+    local installed_host="" installed_cert=""
+    if [[ -r "$SBIN_DIR/sub-manager" ]]; then
+        installed_host=$(sed -n 's/^readonly HOST="\(.*\)"$/\1/p' "$SBIN_DIR/sub-manager" | head -n 1)
+        installed_cert=$(sed -n 's|^readonly CERT_FILE="\(.*\)/fullchain.pem"$|\1|p' \
             "$SBIN_DIR/sub-manager" | head -n 1)
+    fi
+    [[ -n $DOMAIN ]] || DOMAIN=$installed_host
+    if [[ -n $installed_host && $DOMAIN != "$installed_host" ]]; then
+        DOMAIN_CHANGED_FROM=$installed_host
+    elif [[ -z $CERT_DIR ]]; then
+        CERT_DIR=$installed_cert
     fi
     if [[ -z $PROFILE_NAME && -r "$SBIN_DIR/sub-manager" ]]; then
         PROFILE_NAME=$(sed -n 's/^readonly PROFILE_NAME="\(.*\)"$/\1/p' \
@@ -294,6 +305,23 @@ detect_domain() {
 
 cert_files_ok() {
     [[ -s "$1/fullchain.pem" && -s "$1/privkey.pem" ]]
+}
+
+# 证书是否覆盖域名。-checkhost 匹配与否退出码都是 0，只能看输出。
+cert_matches_domain() {
+    openssl x509 -in "$1" -noout -checkhost "$2" 2>/dev/null | grep -qF ' does match certificate'
+}
+
+# 订阅条数放进 SUB_COUNT。区分「没有订阅」和「读取失败」：状态文件存在却读不出
+# 订阅表时直接报错，不能当成 0 条。
+count_subscriptions() {
+    if [[ ! -e $STATE_FILE ]]; then
+        SUB_COUNT=0
+        return 0
+    fi
+    SUB_COUNT=$(jq -e '.clients | if type == "object" then length else error("clients") end' \
+        "$STATE_FILE" 2>/dev/null) \
+        || fail "读不到 $STATE_FILE（不是有效的订阅状态），先用 sub-manager list 检查。"
 }
 
 acme_conf_file() {
@@ -593,8 +621,15 @@ preflight() {
         if acme_sudo_blocked; then
             fail "当前通过 sudo 直接运行（SUDO_USER=$SUDO_USER），acme.sh 在这种方式下拒绝签发。先执行 sudo -i 进入 root shell，再运行 $REPO_ROOT/tools/deploy.sh。"
         fi
-        if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]]; then
-            fail "现有 $NGINX_CONF_D_DIR/private-sub.conf 引用的证书缺失，Nginx 无法重载。先恢复证书，或删掉该文件后重跑。"
+        # 现有配置引用的证书缺失时，部署中途的 nginx -t 会失败。换域名时它引用的是旧
+        # 域名的证书，按它实际引用的文件判断，而不是本次的 CERT_DIR。
+        local psc="$NGINX_CONF_D_DIR/private-sub.conf" ref_cert ref_key
+        if [[ -f $psc ]]; then
+            ref_cert=$(sed -n 's/^[[:space:]]*ssl_certificate[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$psc" | head -n 1)
+            ref_key=$(sed -n 's/^[[:space:]]*ssl_certificate_key[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$psc" | head -n 1)
+            if [[ -z $ref_cert || -z $ref_key || ! -s $ref_cert || ! -s $ref_key ]]; then
+                fail "现有 $psc 引用的证书缺失：$(dirname -- "${ref_cert:-$CERT_DIR/fullchain.pem}")。按 docs/sub/certificates.md §4 把证书重新落盘后重跑。"
+            fi
         fi
         if have ss \
             && ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE '[:.]80$' \
@@ -607,6 +642,20 @@ preflight() {
     else
         [[ -f "$CERT_DIR/fullchain.pem" ]] || fail "证书不存在：$CERT_DIR/fullchain.pem"
         [[ -f "$CERT_DIR/privkey.pem" ]] || fail "私钥不存在：$CERT_DIR/privkey.pem"
+        if have openssl; then
+            cert_matches_domain "$CERT_DIR/fullchain.pem" "$DOMAIN" \
+                || fail "证书 $CERT_DIR/fullchain.pem 不包含域名 $DOMAIN。用 --cert-dir 指定正确的目录，或移走该目录让脚本签发。"
+        else
+            warn "缺少 openssl，跳过证书域名检查；正式部署会先安装 openssl。"
+        fi
+    fi
+
+    if [[ -n $DOMAIN_CHANGED_FROM ]]; then
+        warn "域名将从 $DOMAIN_CHANGED_FROM 改为 $DOMAIN：所有设备的订阅地址都要换成新域名；acme-challenge.conf 只为新域名提供挑战路径，$DOMAIN_CHANGED_FROM 的证书若仍由 acme.sh webroot 续期（例如面板还在用），续期会失败。"
+    fi
+    # 状态文件损坏要在改动之前发现，而不是装到一半在 resync 时才失败。
+    if have jq; then
+        count_subscriptions
     fi
 
     local mem_mb
@@ -686,7 +735,7 @@ print_plan() {
     cat <<EOF
 部署计划
 
-  域名:           $DOMAIN
+  域名:           $DOMAIN$(if [[ -n $DOMAIN_CHANGED_FROM ]]; then printf '\n  域名变更:       %s → %s（所有设备需要重新配置订阅地址）' "$DOMAIN_CHANGED_FROM" "$DOMAIN"; fi)
   证书目录:       $CERT_DIR
   证书:           $cert_state
   依赖:           $dep_state
@@ -739,7 +788,7 @@ print_summary() {
     cat <<EOF
 部署配置
 
-  域名:           $DOMAIN
+  域名:           $DOMAIN$(if [[ -n $DOMAIN_CHANGED_FROM ]]; then printf '\n  域名变更:       %s → %s（所有设备需要重新配置订阅地址）' "$DOMAIN_CHANGED_FROM" "$DOMAIN"; fi)
   证书:           $cert_state
   订阅显示名:     $PROFILE_NAME
   规则端点前缀:   $RULES_PREFIX
@@ -1182,8 +1231,14 @@ install_files() {
     ACME_NORMALIZED=1
     normalize_certbot_renewal
 
-    # 重装时按新常量重建已有的 Nginx 配置；首次安装还没有这个文件。
-    if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]]; then
+    sync_private_conf
+}
+
+# 按订阅状态重建订阅入口配置：有订阅（即使 private-sub.conf 被删了），或配置文件还在
+# （即使已经没有订阅，常量变了也要更新），都 resync。首次安装两者都没有。
+sync_private_conf() {
+    count_subscriptions
+    if (( SUB_COUNT > 0 )) || [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]]; then
         "$SBIN_DIR/sub-manager" resync
     fi
 }
@@ -1210,6 +1265,15 @@ verify_deploy() {
     else
         warn "nginx -t 未通过。"
         failed=1
+    fi
+    if (( SUB_COUNT > 0 )); then
+        if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]] \
+            && ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE '[:.]8443$'; then
+            log "  ✓ 订阅入口 8443 已就绪（$SUB_COUNT 条订阅，端到端验证用 sub-manager test）"
+        else
+            warn "有 $SUB_COUNT 条订阅，但 8443 订阅入口未就绪：运行 sub-manager resync，再 sub-manager test"
+            failed=1
+        fi
     fi
     return "$failed"
 }

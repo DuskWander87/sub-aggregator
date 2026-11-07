@@ -167,7 +167,8 @@ systemctl is-active x-ui nginx subconverter        # 使用证书的服务
 ```
 
 这一步要在重跑 `deploy.sh` 之前做：已有部署的 `/etc/nginx/conf.d/private-sub.conf` 仍引用
-缺失的文件，直接重跑会先在 preflight 被拒绝（「现有 private-sub.conf 引用的证书缺失」）。
+缺失的文件，直接重跑会先在 preflight 被拒绝（「现有 /etc/nginx/conf.d/private-sub.conf 引用的
+证书缺失：<证书目录>。按 docs/sub/certificates.md §4 把证书重新落盘后重跑。」）。
 恢复时 `systemctl reload nginx` 可能因为配置尚未通过校验而报错，文件已经落盘，忽略后重跑
 `deploy.sh` 即可。`--install-cert` 会覆盖
 acme.sh 里保存的 reload hook，所以这里按 §2.2 把完整 hook 写回。这条命令会立即执行 hook，

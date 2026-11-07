@@ -1010,13 +1010,22 @@ cmd_rotate() {
     printf '\n'
 }
 
+# 没有订阅但配置文件还在时照常重建：零订阅的 8443 server 块是合法配置（remove 删掉
+# 最后一条订阅时也走 apply_state 生成它），证书目录或域名等常量变了它也要跟着更新。
 cmd_resync() {
-    local candidate="$WORK_DIR/candidate.json"
-    [[ $(jq '.clients | length' "$STATE_FILE") -gt 0 ]] || fail "尚未配置订阅。"
+    local candidate="$WORK_DIR/candidate.json" count
+    count=$(jq '.clients | length' "$STATE_FILE")
+    if [[ $count -eq 0 && ! -f "$NGINX_FILE" ]]; then
+        fail "尚未配置订阅。"
+    fi
     cp -- "$STATE_FILE" "$candidate"
     printf '正在按当前模板重新生成 Nginx 配置...\n'
     apply_state "$candidate"
-    printf '已重新生成，订阅编号与订阅地址均未改变（用 list 查看）。\n'
+    if [[ $count -eq 0 ]]; then
+        printf '已重新生成（当前没有订阅）。\n'
+    else
+        printf '已重新生成，订阅编号与订阅地址均未改变（用 list 查看）。\n'
+    fi
 }
 
 main() {

@@ -1,6 +1,6 @@
 [Unit]
 Description=Periodically sync self-maintained rule lists
-Documentation=file:///root/code/3x/docs/sub/operations.md
+Documentation=https://github.com/DuskWander87/sub-aggregator/blob/main/docs/sub/operations.md
 
 [Timer]
 # 开机后 30s 跑一次，之后每分钟一次。规则端点直接 serve 发布目录里的文件，

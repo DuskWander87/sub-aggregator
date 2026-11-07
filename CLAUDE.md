@@ -176,7 +176,8 @@ nginx -t
   fragment `#<订阅名>`，那是客户端本地行为。改 `PROFILE_NAME` 后 `resync` 即可，名字保持纯
   ASCII。当前值见 README §3.4。incidents `2026-08-22`
 - **改路径 = 所有设备重配**：只有 `rotate` 会换路径，它保留编号与原始订阅，不必重输 URL；
-  `resync` 只重建 Nginx 配置，编号和地址都不动。
+  `resync` 只重建 Nginx 配置，编号和地址都不动。改域名同样需要所有设备重配，`deploy.sh` 会在
+  摘要里标出域名变更。
 - **`renumber` 只改编号**：`path`、源订阅和节点都不动，设备无需重配；但记住的旧编号会失效，
   之后的 `update` / `rotate` / `remove` 要用新编号。
 - **`rotate` / `remove` ≠ 收回节点访问**：`sub-manager` 对 x-ui / `*.db` 零写操作，它们只

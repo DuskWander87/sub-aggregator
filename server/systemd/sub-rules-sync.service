@@ -1,6 +1,6 @@
 [Unit]
 Description=Sync self-maintained rule lists from GitHub to the publish dir
-Documentation=file:///root/code/3x/docs/sub/operations.md
+Documentation=https://github.com/DuskWander87/sub-aggregator/blob/main/docs/sub/operations.md
 After=network-online.target
 Wants=network-online.target
 

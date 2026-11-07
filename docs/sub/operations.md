@@ -203,6 +203,9 @@ sub-manager resync
 
 **例外**：若状态文件仍是 v1，这一步会触发 schema 升级，届时所有路径都会换新（见 §1.1）。
 
+没有订阅时，只要 `private-sub.conf` 存在，resync 照常按当前常量重建它。resync 不重新拉取
+订阅，也不做 §3.2.1 的转换校验；改了模板或 snippets，resync 之后再跑 `sub-manager test`。
+
 若改的是 subconverter 侧的模板或 snippets，**先重启再 resync**，`pref.ini` 的
 `cache_config=300` 会缓存模板：
 
@@ -336,8 +339,8 @@ journalctl -u subconverter.service -u nginx.service \
 
 #### 3.2.1 脚本自动校验的 11 项
 
-`validate_source_and_conversion()` 在 `add` / `update` / `resync` 时逐项检查，任一缺失即拒绝
-应用配置，防止模板退化：
+`validate_source_and_conversion()` 在 `add`（含 `--from-xui`）和 `update` 时逐项检查，任一缺失
+即拒绝应用配置；`sub-manager test` 对每条订阅执行同样的检查，用来在改模板之后发现退化：
 
 - 策略组 `🚀节点选择` 存在
 - 策略组数量恰好为 1

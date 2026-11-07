@@ -8,6 +8,58 @@
 
 ---
 
+## 2026-11-07 重装时订阅配置与证书目录沿用旧状态
+
+### 现象
+
+由代码审查发现，未在生产环境触发。三条链路：
+
+- 按 preflight 当时的提示删掉 `private-sub.conf` 后重跑部署：订阅全部失效，验证却通过。
+- 用 `--domain` 换域名重装：8443 发出的仍是旧域名的证书。
+- 删掉最后一条订阅后重跑部署：`sub-manager resync` 报「尚未配置订阅」，部署中止。
+
+### 排查
+
+- `install_files` 只在 `private-sub.conf` 存在时才 resync；文件被删后，`clients.json` 里的订阅
+  不会被重建，`verify_deploy` 也不检查 8443。
+- `detect_existing_values` 无条件沿用已安装 `sub-manager` 的 `CERT_FILE` 目录，不和本次传入的
+  `--domain` 比对；复用证书时也不检查它是否覆盖新域名。
+- `cmd_resync` 在没有订阅时直接失败；而 `cmd_remove` 删除最后一条订阅时，会经过 `apply_state`
+  生成零订阅的 8443 server 块。
+- 规划时顺带发现：`operations.md` §3.2.1 写着 resync 会做转换校验，但代码里只有 add（含
+  `--from-xui`）、update、test 调用 `validate_source_and_conversion`；规则同步单元的
+  `Documentation=` 指向一个已经不存在的旧仓库路径。
+
+### 被排除的方向
+
+- 不是 sub-manager 的渲染问题：零订阅配置是合法的，`cmd_remove` 一直在用。
+- 不是 Nginx 校验的问题：`nginx -t` 对零订阅配置和旧证书配置都通过。
+
+### 根因
+
+重装时用「某个文件是否存在」代替读取订阅状态；已安装的值没有和本次传入的参数做比对。
+
+### 解决方案
+
+- `sync_private_conf`：读 `clients.json` 的订阅条数（读不出时报错，不当成 0），有订阅或
+  `private-sub.conf` 存在时 resync；preflight 提前读一次，状态损坏时不做任何改动。
+- `verify_deploy`：有订阅时要求 `private-sub.conf` 存在且 8443 在监听。
+- `detect_existing_values`：已安装域名与本次不同时记下域名变更，不沿用旧证书目录；preflight
+  与摘要标出变更。复用证书时用 `openssl x509 -checkhost` 检查它覆盖订阅域名（该命令匹配与否
+  退出码都是 0，只能看输出）。
+- preflight 的「证书缺失」检查改看 `private-sub.conf` 实际引用的证书文件，并指向
+  `certificates.md` §4。
+- `sub-manager resync`：没有订阅但配置文件存在时照常重建。
+- 文档：`operations.md` 写明 resync 不做转换校验；规则同步单元的 `Documentation=` 改为公开
+  仓库地址。
+
+### 验证
+
+- `tools/selftest.sh` 的 T21–T25 先红后绿，T1–T20 保持通过。
+- `bash -n` 校验四个脚本；`tools/deploy.sh --dry-run` 退出 0。
+
+---
+
 ## 2026-11-07 回滚与恢复没有回到原状态
 
 ### 现象
