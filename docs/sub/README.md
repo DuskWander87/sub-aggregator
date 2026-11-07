@@ -18,7 +18,7 @@
 
 | 文档 | 内容 | 什么时候读 | 编辑规律 |
 |---|---|---|---|
-| [deploy.md](deploy.md) | 从零部署：前提、脚本、手动步骤、备份与回滚 | 第一次安装或重装 | 与 `tools/deploy.sh` 同步 |
+| [deploy.md](deploy.md) | 从零部署与卸载：前提、脚本、手动步骤、备份与回滚 | 第一次安装、重装或卸载 | 与 `tools/deploy.sh`、`tools/uninstall.sh` 同步 |
 | [operations.md](operations.md) | 管理脚本、编号与轮换、检查与验证、备份范围 | 要动手做某件事 | 保持精简，不留历史 |
 | [unified-subscription.md](unified-subscription.md) | 订阅入口：UA 分流规则、两个分支的输出、2096 收口 | 给设备配订阅、或要改分流规则 | §2 判定规则是**单一事实源** |
 | [design.md](design.md) | 环境、选型、配置、安全模型、策略组 / DNS / 规则分发设计 | 要改系统，需要先知道为什么是现在这样 | 改服务器必须同步改 |

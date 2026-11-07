@@ -328,7 +328,44 @@ openssl x509 -in /root/cert/sub.example.com/fullchain.pem -noout -enddate
 sub-rules-check
 ```
 
-## 6. 常见问题
+## 6. 卸载
+
+只删除部署脚本写入的聚合层产物，一条命令、没有参数：
+
+```bash
+tools/uninstall.sh
+```
+
+脚本先打印计划（删什么、留什么、备份落点），再要求确认；需要在交互式终端里运行。确认后先
+备份到 `/root/sub-aggregator-uninstall-backup-<时间戳>-<pid>/`，然后停止并禁用
+`subconverter.service`、`sub-rules-sync.timer`，删除管理脚本、systemd 单元、本服务的 Nginx
+配置、`/etc/sub-manager`、`/opt/subconverter-classic`、规则发布目录和缓存。
+
+以下内容保持原样：
+
+- 3x-ui、Xray、`/etc/x-ui/x-ui.db`、443 与 2096：卸载脚本对 x-ui 零读写。
+- Nginx 包与运行中的进程：`deploy.sh` 只启动/重载 Nginx，是否由 `--install-deps` 安装无法
+  可靠判断，删包会连 `/etc/nginx` 的其它配置一起清掉。卸载只移除本服务的配置文件，
+  `nginx -t` 通过后 reload。确认 Nginx 只为本项目安装时再手工 `apt purge nginx`。
+- 证书与 acme.sh，以及 `acme-challenge.conf` + `/var/www/acme`：后者是证书续期的 webroot
+  链路，删掉会让续期静默失败。确定不再使用该证书时手工删除这两处，并执行
+  `acme.sh --remove -d <域名>`。
+- 规则仓库工作副本（默认 `/root/code/shadowrocket-config`）：git 仓库不属于安装产物。
+- `/etc/hosts` 的 `127.0.0.1 <订阅域名>` 映射：属于 §3.5 的手工步骤，脚本只报告、不修改。
+
+恢复：
+
+```bash
+/root/sub-aggregator-uninstall-backup-<时间戳>-<pid>/restore.sh
+```
+
+`restore.sh` 按原路径解包并重新启用服务。历史部署备份 `/root/sub-aggregator-backup-*` 不受
+影响。
+
+卸载不会收回节点访问：已拉取的 profile 里 UUID 仍然有效，真正踢人要去 3x-ui 删除或更换该
+客户端的 UUID，见 [unified-subscription.md](unified-subscription.md) §6。
+
+## 7. 常见问题
 
 - **8443 被别的进程占用**：脚本会直接失败。先确认占用者，`ss -lntp | grep 8443`。
 - **证书签发失败**：确认域名的 A/AAAA 记录指向本机、公网 80 端口可达（安全组 / 防火墙），

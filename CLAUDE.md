@@ -18,7 +18,7 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 | 文档 | 内容 | 什么时候读 | 编辑规律 |
 |---|---|---|---|
 | `docs/sub/README.md` | 索引、架构、端口/路径/`CONVERT_OPTS` 速查 | 找入口、查常量 | §3 是**单一事实源** |
-| `docs/sub/deploy.md` | 从零部署：前提、脚本、手动步骤、备份与回滚 | 第一次安装或重装 | 与 `tools/deploy.sh` 保持同步 |
+| `docs/sub/deploy.md` | 从零部署与卸载：前提、脚本、手动步骤、备份与回滚 | 第一次安装、重装或卸载 | 与 `tools/deploy.sh`、`tools/uninstall.sh` 保持同步 |
 | `docs/sub/operations.md` | 管理脚本、编号与轮换、检查与验证、备份范围 | 要动手做某件事 | 保持精简 |
 | `docs/sub/unified-subscription.md` | 订阅入口：UA 分流规则、两个分支的输出、2096 收口 | 给设备配订阅、要改分流规则 | §2 判定规则是**单一事实源** |
 | `docs/sub/design.md` | 环境、选型、配置、安全模型、策略组 / DNS / 规则分发设计 | 要改系统，需先知道为什么是现在这样 | 改服务器必须同步改 |
@@ -109,6 +109,7 @@ README §3.1。
 
 ```bash
 tools/deploy.sh --dry-run       # 预览首次部署（仓库工具，不装到真机）
+tools/uninstall.sh              # 卸载聚合层；先打印计划再确认，不碰 3x-ui、证书与 Nginx
 ```
 
 订阅管理一律走脚本，不要手工编辑它生成的 Nginx 配置：

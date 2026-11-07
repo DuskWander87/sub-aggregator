@@ -55,6 +55,9 @@ tools/deploy.sh             # 逐步确认后执行安装
 
 脚本默认逐步确认，覆盖前先备份。参数、手动步骤、规则链和回滚见 [deploy.md](docs/sub/deploy.md)。
 
+不想再用了就跑 `tools/uninstall.sh`。它会先打印计划再等确认，只删聚合层，3x-ui、节点、
+证书和 Nginx 本身不动。
+
 规则链是可选步骤。加 `--with-rules` 启用，默认使用作者的 [规则集](https://github.com/DuskWander87/shadowrocket-config)；想自己维护就 fork 后传 `--rules-repo`。
 
 ## 日常操作
@@ -101,7 +104,7 @@ docs/              中文运维文档
 | 文档 | 什么时候读 |
 |---|---|
 | [docs/sub/README.md](docs/sub/README.md) | 找入口、查常量（端口、路径、`CONVERT_OPTS` 的单一事实源） |
-| [deploy.md](docs/sub/deploy.md) | 第一次安装或重装：前提、脚本、手动步骤、回滚 |
+| [deploy.md](docs/sub/deploy.md) | 第一次安装、重装或卸载：前提、脚本、手动步骤、回滚 |
 | [design.md](docs/sub/design.md) | 要改系统，先看设计取舍 |
 | [unified-subscription.md](docs/sub/unified-subscription.md) | 给设备配订阅，或要改 UA 分流规则 |
 | [operations.md](docs/sub/operations.md) | 管理脚本、轮换撤销、检查与验证、备份 |
