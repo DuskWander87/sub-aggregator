@@ -160,6 +160,9 @@ printf 'ss %s\n' "\$*" >>'$SANDBOX/calls.log'
 if [[ \${STUB_SS_PORT80:-0} -eq 1 ]]; then
     printf 'LISTEN 0 511 0.0.0.0:80 0.0.0.0:*\n'
 fi
+if [[ \${STUB_SS_PORT8443:-0} -eq 1 ]]; then
+    printf 'LISTEN 0 511 0.0.0.0:8443 0.0.0.0:*\n'
+fi
 exit 0
 EOF
     chmod 0755 "$STUB_BIN/systemctl" "$STUB_BIN/nginx" "$STUB_BIN/ss"
@@ -384,11 +387,11 @@ t1() {
     local wr rc=$RC out=$OUT order
     wr=$(conf_get "$(acme_conf)" Le_Webroot)
     run_deploy b_install_files_order
-    order=$(printf '%s\n' "$OUT" | grep -oE '\b(issue_cert|normalize_acme_renewal)\b' | paste -sd, -)
+    order=$(printf '%s\n' "$OUT" | grep -oE '\b(issue_cert|normalize_acme_renewal|normalize_certbot_renewal)\b' | paste -sd, -)
     st_check T1 "F1 复用 LE standalone 证书后续期改为 webroot" \
-        "rc=0 Le_Webroot=$WEBROOT 顺序 issue_cert,normalize_acme_renewal" \
+        "rc=0 Le_Webroot=$WEBROOT 顺序 issue_cert,normalize_acme_renewal,normalize_certbot_renewal" \
         "rc=$rc Le_Webroot=$wr 顺序 $order；$(oneline "$out")" \
-        test "$rc" -eq 0 -a "$wr" = "$WEBROOT" -a "${order%%,*}" = issue_cert
+        test "$rc" -eq 0 -a "$wr" = "$WEBROOT" -a "$order" = issue_cert,normalize_acme_renewal,normalize_certbot_renewal
 }
 
 t8() {
@@ -589,13 +592,20 @@ t13() {
     local mode content=""
     mode=$(stat -c %a -- "$hook" 2>/dev/null || echo missing)
     [[ -f $hook ]] && content=$(cat -- "$hook")
+    local other own
+    : >"$SANDBOX/calls.log"
+    [[ -f $hook ]] && RENEWED_LINEAGE="$ROOT/etc/letsencrypt/live/other.test" PATH="$STUB_BIN:$PATH" sh "$hook"
+    other=$(cat -- "$SANDBOX/calls.log")
+    [[ -f $hook ]] && RENEWED_LINEAGE="$live" PATH="$STUB_BIN:$PATH" sh "$hook"
+    own=$(cat -- "$SANDBOX/calls.log")
     if [[ $mode == 755 ]] && has "$content" 'systemctl reload nginx' \
-        && has "$OUT" "certbot reconfigure --cert-name $D --webroot -w"; then
+        && has "$OUT" "certbot reconfigure --cert-name $D --webroot -w" \
+        && [[ -z $other ]] && has "$own" "systemctl reload nginx"; then
         st_pass T13 "C1 certbot 证书安装 deploy hook，standalone 只警告"
     else
         st_fail T13 "C1 certbot 证书安装 deploy hook，standalone 只警告" \
-            "hook 0755 含 reload nginx；提示 certbot reconfigure" \
-            "mode=$mode content=$(oneline "$content")；$(oneline "$OUT")"
+            "hook 0755 含 reload nginx；提示 certbot reconfigure；别的证书续期时 hook 不动作" \
+            "mode=$mode content=$(oneline "$content")；别的证书：$(oneline "$other")；本证书：$(oneline "$own")；$(oneline "$OUT")"
     fi
 }
 
@@ -839,12 +849,75 @@ t24() {
 }
 
 b_verify() { SUB_COUNT=2; if verify_deploy; then printf 'R=0\n'; else printf 'R=1\n'; fi; }
+b_verify_ready() { export STUB_SS_PORT8443=1; b_verify; }
 
 t25() {
+    local bad good
     st_reset
     run_deploy b_verify
-    st_check T25 "P5 有订阅但 8443 未就绪时验证失败" "R=1；含「8443 订阅入口未就绪」" "$(oneline "$OUT")" \
-        eval '[[ $(field R) == 1 ]] && has "$OUT" "8443 订阅入口未就绪"'
+    bad="R=$(field R) $(oneline "$OUT")"
+    install -d -m 0755 "$(dirname -- "$PRIVATE_SUB")"
+    printf 'server {}\n' >"$PRIVATE_SUB"
+    run_deploy b_verify_ready
+    good="R=$(field R) $(oneline "$OUT")"
+    st_check T25 "P5 有订阅时验证 8443 入口" "未就绪 R=1 且提示；就绪 R=0 且「已就绪」" "未就绪：$bad；就绪：$good" \
+        eval '[[ $bad == "R=1 "*"8443 订阅入口未就绪"* && $good == "R=0 "*"订阅入口 8443 已就绪"* ]]'
+}
+
+# ---------- 审查修正 ----------
+
+b_sync_quiet() { sync_private_conf; }
+
+t26() {
+    st_reset
+    st_sub_manager_stub
+    install -d -m 0755 "$(dirname -- "$PRIVATE_SUB")"
+    printf 'server {}\n' >"$PRIVATE_SUB"
+    run_deploy b_sync_quiet
+    local called=no
+    grep -qx resync "$SANDBOX/sub-manager.log" 2>/dev/null && called=yes
+    st_check T26 "状态文件缺失而配置还在时拒绝 resync" "rc≠0，不调用 resync，提示状态文件缺失" \
+        "rc=$RC resync=$called $(oneline "$OUT")" \
+        eval '(( RC != 0 )) && [[ $called == no ]] && has "$OUT" "缺失"'
+}
+
+t27() {
+    st_reset
+    install -d -m 0755 "$(dirname -- "$PRIVATE_SUB")"
+    printf 'ORIGINAL\n' >"$PRIVATE_SUB"
+    OUT=$(PATH="$STUB_BIN:$PATH" bash "$SUB_MANAGER_COPY" resync 2>&1)
+    RC=$?
+    local content
+    content=$(cat -- "$PRIVATE_SUB")
+    st_check T27 "sub-manager：状态文件缺失时 resync 不覆盖现有配置" "rc≠0；private-sub.conf 仍是 ORIGINAL" \
+        "rc=$RC 文件=$(oneline "$content")；$(oneline "$OUT")" \
+        eval '(( RC != 0 )) && [[ $content == ORIGINAL ]]'
+}
+
+t28() {
+    st_reset
+    seed_acme le /var/www/html
+    conf_set "$(acme_conf)" Le_Alt "www.$D"
+    conf_set "$(acme_conf)" Le_RealFullChainPath "$CERT/fullchain.pem"
+    conf_set "$(acme_conf)" Le_RealKeyPath "$CERT/privkey.pem"
+    run_deploy b_normalize_reuse
+    local wr
+    wr=$(conf_get "$(acme_conf)" Le_Webroot)
+    st_check T28 "多域名证书不改写 webroot" "Le_Webroot 仍为 /var/www/html 且警告" "Le_Webroot=$wr；$(oneline "$OUT")" \
+        eval '[[ $wr == /var/www/html ]] && has "$OUT" "警告"'
+}
+
+t29() {
+    st_reset
+    seed_acme le "$WEBROOT"
+    conf_set "$(acme_conf)" Le_API "$ZEROSSL_API"
+    conf_set "$(acme_conf)" Le_RealFullChainPath "$CERT/fullchain.pem"
+    conf_set "$(acme_conf)" Le_RealKeyPath "$CERT/privkey.pem"
+    run_deploy b_normalize_reuse
+    local api
+    api=$(conf_get "$(acme_conf)" Le_API)
+    st_check T29 "证书已是 LE 而 conf 仍指向旧 CA 时对齐 Le_API" "Le_API=LE" "Le_API=$api；$(oneline "$OUT")" \
+        test "$api" = "$LE_API"
 }
 
 # ---------- 入口 ----------
@@ -887,6 +960,10 @@ main() {
     t23
     t24
     t25
+    t26
+    t27
+    t28
+    t29
 
     printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
     (( FAILED == 0 ))

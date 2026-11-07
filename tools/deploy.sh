@@ -48,6 +48,8 @@ readonly ACME_NGINX_CONF="$NGINX_CONF_D_DIR/acme-challenge.conf"
 # 签发源固定为 Let's Encrypt，不依赖本机 acme.sh 的默认 CA。上游默认是 ZeroSSL，
 # 注册账户需要邮箱；固定 CA 后签发不再需要邮箱。
 readonly ACME_CA_SERVER="letsencrypt"
+# acme.sh 把 --server letsencrypt 解析成这个目录地址，存进 conf 的 Le_API。
+readonly ACME_LE_DIRECTORY="https://acme-v02.api.letsencrypt.org/directory"
 # certbot：复用 /etc/letsencrypt/live/<域名>/ 的证书时，在这里装 deploy hook。
 readonly CERTBOT_DIR="/etc/letsencrypt"
 readonly CERTBOT_HOOK="$CERTBOT_DIR/renewal-hooks/deploy/sub-aggregator.sh"
@@ -316,6 +318,10 @@ cert_matches_domain() {
 # 订阅表时直接报错，不能当成 0 条。
 count_subscriptions() {
     if [[ ! -e $STATE_FILE ]]; then
+        # 配置还在而状态没了：resync 会按空状态重建，所有订阅地址失效。
+        if [[ -f "$NGINX_CONF_D_DIR/private-sub.conf" ]]; then
+            fail "订阅状态 $STATE_FILE 缺失，但 $NGINX_CONF_D_DIR/private-sub.conf 仍在：重建会让所有订阅地址失效。先从备份恢复状态文件再重跑。"
+        fi
         SUB_COUNT=0
         return 0
     fi
@@ -617,19 +623,20 @@ preflight() {
         fi
     fi
 
+    # 现有配置引用的证书缺失时，部署中途的 nginx -t 会失败。换域名时它引用的是旧
+    # 域名的证书，按它实际引用的文件判断，而不是本次的 CERT_DIR。
+    local psc="$NGINX_CONF_D_DIR/private-sub.conf" ref_cert ref_key
+    if [[ -f $psc ]]; then
+        ref_cert=$(sed -n 's/^[[:space:]]*ssl_certificate[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$psc" | head -n 1)
+        ref_key=$(sed -n 's/^[[:space:]]*ssl_certificate_key[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$psc" | head -n 1)
+        if [[ -z $ref_cert || -z $ref_key || ! -s $ref_cert || ! -s $ref_key ]]; then
+            fail "现有 $psc 引用的证书缺失：$(dirname -- "${ref_cert:-$CERT_DIR/fullchain.pem}")。按 docs/sub/certificates.md §4 把证书重新落盘后重跑。"
+        fi
+    fi
+
     if [[ $CERT_NEEDS_ISSUE -eq 1 ]]; then
         if acme_sudo_blocked; then
             fail "当前通过 sudo 直接运行（SUDO_USER=$SUDO_USER），acme.sh 在这种方式下拒绝签发。先执行 sudo -i 进入 root shell，再运行 $REPO_ROOT/tools/deploy.sh。"
-        fi
-        # 现有配置引用的证书缺失时，部署中途的 nginx -t 会失败。换域名时它引用的是旧
-        # 域名的证书，按它实际引用的文件判断，而不是本次的 CERT_DIR。
-        local psc="$NGINX_CONF_D_DIR/private-sub.conf" ref_cert ref_key
-        if [[ -f $psc ]]; then
-            ref_cert=$(sed -n 's/^[[:space:]]*ssl_certificate[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$psc" | head -n 1)
-            ref_key=$(sed -n 's/^[[:space:]]*ssl_certificate_key[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$psc" | head -n 1)
-            if [[ -z $ref_cert || -z $ref_key || ! -s $ref_cert || ! -s $ref_key ]]; then
-                fail "现有 $psc 引用的证书缺失：$(dirname -- "${ref_cert:-$CERT_DIR/fullchain.pem}")。按 docs/sub/certificates.md §4 把证书重新落盘后重跑。"
-            fi
         fi
         if have ss \
             && ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE '[:.]80$' \
@@ -651,7 +658,7 @@ preflight() {
     fi
 
     if [[ -n $DOMAIN_CHANGED_FROM ]]; then
-        warn "域名将从 $DOMAIN_CHANGED_FROM 改为 $DOMAIN：所有设备的订阅地址都要换成新域名；acme-challenge.conf 只为新域名提供挑战路径，$DOMAIN_CHANGED_FROM 的证书若仍由 acme.sh webroot 续期（例如面板还在用），续期会失败。"
+        warn "域名将从 $DOMAIN_CHANGED_FROM 改为 $DOMAIN：所有设备的订阅地址都要换成新域名；acme-challenge.conf 只为新域名提供挑战路径，$DOMAIN_CHANGED_FROM 的证书若仍由 acme.sh webroot 续期（例如面板还在用），续期会失败；已有订阅的原始订阅地址仍指向 $DOMAIN_CHANGED_FROM，见 docs/sub/deploy.md §7「改域名」。"
     fi
     # 状态文件损坏要在改动之前发现，而不是装到一半在 resync 时才失败。
     if have jq; then
@@ -890,14 +897,18 @@ if [[ -s $backup_dir/restore.list ]]; then
     while IFS= read -r p; do
         [[ $p == "$PRIVATE_SUB_CONF" ]] && continue
         [[ -e "$backup_dir$p" ]] || continue
-        mkdir -p "$(dirname -- "$p")"
-        rm -rf -- "$p"
-        cp -a "$backup_dir$p" "$p"
+        if ! { mkdir -p "$(dirname -- "$p")" && rm -rf -- "$p" && cp -a "$backup_dir$p" "$p"; }; then
+            printf '恢复 %s 失败。\n' "$p" >&2
+            rc=1
+        fi
     done <"$backup_dir/restore.list"
 fi
 if [[ -s $backup_dir/remove.list ]]; then
     while IFS= read -r p; do
-        rm -rf -- "$p"
+        if ! rm -rf -- "$p"; then
+            printf '删除 %s 失败。\n' "$p" >&2
+            rc=1
+        fi
     done <"$backup_dir/remove.list"
 fi
 systemctl daemon-reload || true
@@ -930,9 +941,11 @@ fi
 if [[ -s $backup_dir/restore.list ]]; then
     while IFS= read -r p; do
         [[ $p == "$ACME_HOME"/*.conf && -f $p ]] || continue
-        grep -qx "Le_Webroot='no'" "$p" || continue
-        if ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE '[:.]80$'; then
+        if grep -qx "Le_Webroot='no'" "$p" \
+            && ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE '[:.]80$'; then
             printf 'acme.sh 恢复为 standalone 续期，但 80 端口仍在监听：续期会失败。重跑 tools/deploy.sh（会改回 webroot），或停掉占用 80 端口的服务。\n' >&2
+        elif grep -qx "Le_Webroot='alpn'" "$p"; then
+            printf 'acme.sh 恢复为 alpn 续期，但 443 由 Xray 占用：续期会失败。重跑 tools/deploy.sh（会改回 webroot）。\n' >&2
         fi
     done <"$backup_dir/restore.list"
 fi
@@ -1037,7 +1050,7 @@ acme_reload_cmd() {
 # 每次部署都重启一次 x-ui 等于碰 443。
 # 只处理 acme.sh 安装到 CERT_DIR 的证书；安装到别处时只警告，不碰它的配置。
 normalize_acme_renewal() {
-    local conf installed webroot reloadcmd
+    local conf installed webroot alt api reloadcmd
     if [[ -r "$ACME_HOME/${DOMAIN}_ecc/${DOMAIN}.conf" && -r "$ACME_HOME/${DOMAIN}/${DOMAIN}.conf" ]]; then
         warn "acme.sh 里同时有 $DOMAIN 的 RSA 与 ECC 两份证书配置，部署只管理 ECC（${DOMAIN}_ecc）。确认 RSA 那份不再使用后执行：$ACME_HOME/acme.sh --remove -d $DOMAIN"
     fi
@@ -1052,6 +1065,13 @@ normalize_acme_renewal() {
     # 对齐规则与 docs/sub/certificates.md §2.2 的表一致。逗号分隔表示多域名各用
     # 不同方式，无法整体改写；DNS 验证不经过 80 端口，保持原样。
     webroot=$(sed -n "s/^Le_Webroot='\(.*\)'$/\1/p" "$conf" | head -n 1)
+    alt=$(sed -n "s/^Le_Alt='\(.*\)'$/\1/p" "$conf" | head -n 1)
+    # 多域名证书：acme-challenge.conf 只为订阅域名提供挑战路径，改成 webroot 会让
+    # 其余域名的验证失败，整张证书续期失败。只警告。
+    if [[ -n $alt && $alt != no && $webroot != "$ACME_WEBROOT" && $webroot != dns && $webroot != dns_* ]]; then
+        warn "acme.sh 里 $DOMAIN 的证书还包含其他域名（$alt），续期方式是 $webroot。80 端口的挑战路径只服务 $DOMAIN，脚本不改它；确认续期不依赖 80 端口独占，或把这张证书拆开。"
+        webroot=$ACME_WEBROOT
+    fi
     case $webroot in
         "$ACME_WEBROOT") ;;
         dns|dns_*) ;;
@@ -1064,6 +1084,18 @@ normalize_acme_renewal() {
         *)
             warn "acme.sh 里 $DOMAIN 的续期方式未识别（Le_Webroot='$webroot'），脚本不改它。确认续期不依赖 80 端口独占。" ;;
     esac
+
+    # 证书已是 LE、conf 却仍指向别的 CA（例如回滚恢复了重签之前的 conf）：renew 只读
+    # Le_API，不对齐就会向旧 CA 续期。
+    api=$(sed -n "s/^Le_API='\(.*\)'$/\1/p" "$conf" | head -n 1)
+    if [[ $api != "$ACME_LE_DIRECTORY" ]] && acme_cert_is_letsencrypt; then
+        if grep -q '^Le_API=' "$conf"; then
+            sed -i "s|^Le_API=.*$|Le_API='$ACME_LE_DIRECTORY'|" "$conf"
+        else
+            printf "Le_API='%s'\n" "$ACME_LE_DIRECTORY" >>"$conf"
+        fi
+        log "acme.sh 续期 CA：${api:-（未设置）} → Let's Encrypt（证书本身由 Let's Encrypt 签发）"
+    fi
 
     reloadcmd=$(acme_reload_cmd)
     set_acme_reloadcmd "$conf" "$reloadcmd"
@@ -1079,15 +1111,17 @@ cert_dir_is_certbot() {
 normalize_certbot_renewal() {
     cert_dir_is_certbot || return 0
 
-    local name renewal hook="systemctl reload nginx" tmp fix
+    local name renewal hook="systemctl reload nginx" tmp fix lineage
     name=$(basename -- "$CERT_DIR")
+    # certbot 对每张证书的续期都执行 renewal-hooks/deploy/ 下的全部脚本，只对本证书动作。
+    lineage=${CERT_DIR//\'/\'\\\'\'}
     if xui_uses_cert_dir; then
         hook="systemctl restart x-ui || rc-service x-ui restart; $hook"
     fi
     install -d -m 0755 "$(dirname -- "$CERTBOT_HOOK")"
     tmp=$(mktemp "$CERTBOT_HOOK.XXXXXX")
-    printf '#!/bin/sh\n# 由 sub-aggregator 的 deploy.sh 生成：certbot 续期成功后让 Nginx（以及使用同一证书的 x-ui）加载新证书\n%s\n' \
-        "$hook" >"$tmp"
+    printf '#!/bin/sh\n# 由 sub-aggregator 的 deploy.sh 生成：certbot 续期成功后让 Nginx（以及使用同一证书的 x-ui）加载新证书\n[ "$RENEWED_LINEAGE" = '"'"'%s'"'"' ] || exit 0\n%s\n' \
+        "$lineage" "$hook" >"$tmp"
     chmod 0755 "$tmp"
     mv -f -- "$tmp" "$CERTBOT_HOOK"
     log "certbot：续期后执行 $CERTBOT_HOOK（$hook）"

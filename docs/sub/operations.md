@@ -203,7 +203,8 @@ sub-manager resync
 
 **例外**：若状态文件仍是 v1，这一步会触发 schema 升级，届时所有路径都会换新（见 §1.1）。
 
-没有订阅时，只要 `private-sub.conf` 存在，resync 照常按当前常量重建它。resync 不重新拉取
+没有订阅时，只要 `private-sub.conf` 存在，resync 照常按当前常量重建它；但状态文件缺失而
+`private-sub.conf` 还在时拒绝执行，因为按空状态重建会让所有订阅地址失效。resync 不重新拉取
 订阅，也不做 §3.2.1 的转换校验；改了模板或 snippets，resync 之后再跑 `sub-manager test`。
 
 若改的是 subconverter 侧的模板或 snippets，**先重启再 resync**，`pref.ini` 的

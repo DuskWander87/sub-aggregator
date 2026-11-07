@@ -40,6 +40,8 @@ readonly XUI_SUB_PORT_DEFAULT="2096"
 readonly XUI_SUB_PATH_DEFAULT="/sub/"
 
 WORK_DIR=""
+# prepare_state 本次新建了空状态文件（原来不存在）。
+STATE_CREATED=0
 
 cleanup() {
     [[ -n "$WORK_DIR" ]] && rm -rf -- "$WORK_DIR"
@@ -110,6 +112,7 @@ prepare_state() {
     install -d -m 0700 -o root -g root "$STATE_DIR"
     if [[ ! -e "$STATE_FILE" ]]; then
         printf '{"version":2,"clients":{}}\n' >"$STATE_FILE"
+        STATE_CREATED=1
     fi
     [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || fail "状态文件类型不安全。"
     chmod 0600 "$STATE_FILE"
@@ -1017,6 +1020,11 @@ cmd_resync() {
     count=$(jq '.clients | length' "$STATE_FILE")
     if [[ $count -eq 0 && ! -f "$NGINX_FILE" ]]; then
         fail "尚未配置订阅。"
+    fi
+    # 状态文件丢了而配置还在：按空状态重建会让所有订阅地址失效，拒绝。
+    if [[ $STATE_CREATED -eq 1 && -f "$NGINX_FILE" ]]; then
+        rm -f -- "$STATE_FILE"
+        fail "状态文件 $STATE_FILE 缺失，但 $NGINX_FILE 仍在：拒绝按空状态重建（会让所有订阅地址失效）。先从备份恢复状态文件。"
     fi
     cp -- "$STATE_FILE" "$candidate"
     printf '正在按当前模板重新生成 Nginx 配置...\n'

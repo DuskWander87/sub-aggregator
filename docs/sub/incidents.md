@@ -49,13 +49,16 @@
   退出码都是 0，只能看输出）。
 - preflight 的「证书缺失」检查改看 `private-sub.conf` 实际引用的证书文件，并指向
   `certificates.md` §4。
-- `sub-manager resync`：没有订阅但配置文件存在时照常重建。
+- `sub-manager resync`：没有订阅但配置文件存在时照常重建；状态文件缺失（`prepare_state` 刚
+  新建了空状态）而配置文件还在时拒绝，deploy 的 `count_subscriptions` 同样拒绝。审查时在沙箱
+  里复现：放宽守卫后，状态文件丢失会让 resync 把现有配置重建成零订阅，所有订阅地址失效。
+- preflight 的「证书缺失」检查不只在签发路径上做，复用证书时同样检查。
 - 文档：`operations.md` 写明 resync 不做转换校验；规则同步单元的 `Documentation=` 改为公开
   仓库地址。
 
 ### 验证
 
-- `tools/selftest.sh` 的 T21–T25 先红后绿，T1–T20 保持通过。
+- `tools/selftest.sh` 的 T21–T25 先红后绿，T1–T20 保持通过；审查补充的 T26–T29 先红后绿。
 - `bash -n` 校验四个脚本；`tools/deploy.sh --dry-run` 退出 0。
 
 ---
@@ -99,7 +102,7 @@
   只启动原来在运行的；`nginx -t` 失败时以非 0 退出。
 - 部署 restore 先 `systemctl disable --now` 本次新建的单元，再删文件；不恢复
   `private-sub.conf`，改为用恢复后的 `sub-manager resync` 重建；恢复出 standalone 而 80 端口
-  被占时提示；有检查未通过时以非 0 退出，`--rollback` 随之报错。
+  被占、或恢复出 alpn 时提示；拷贝或删除失败、检查未通过时以非 0 退出，`--rollback` 随之报错。
 - `uninstall.sh` 的 `stop_services` 无条件 `stop` 三个单元，`verify_uninstall` 检查 subconverter
   是否仍在运行；入口加 ERR trap，中断时打印恢复命令。
 - deploy 装了 nginx 却在续期方式对齐之前退出（包括确认时取消）时，EXIT trap 提示 standalone
@@ -163,6 +166,9 @@
 - 续期方式对齐从只认 `'no'` 扩展为 `certificates.md` §2.2 的表；RSA 与 ECC 并存时警告。
 - 同批修正：sudo 直接运行时在 preflight 拒绝；`fail` 在备份之后打印回滚命令；复用 certbot
   证书时安装 deploy hook，standalone 续期只警告并给出 `certbot reconfigure` 命令。
+- 审查补充：多域名证书（`Le_Alt` 不是 `no`）不改写 webroot，只警告；证书已是 LE 而 `Le_API`
+  仍指向旧 CA 时（例如回滚恢复了重签前的 conf）对齐 `Le_API`；certbot hook 只在
+  `$RENEWED_LINEAGE` 是本证书时动作，免得别的证书续期也重启 x-ui。
 
 ### 验证
 

@@ -127,7 +127,7 @@ privkey.pem      # 私钥（0600）
 4. acme.sh 的 `install-cert` 记录。
 5. 都没有时自动签发到 `/root/cert/<域名>/`。
 
-复用的证书必须覆盖订阅域名，否则脚本在做任何改动之前就报错。
+复用的证书必须覆盖订阅域名，否则脚本在 preflight 就报错，不备份、不安装任何聚合层文件。
 
 自动签发走 ACME HTTP-01：脚本安装 `/etc/nginx/conf.d/acme-challenge.conf`（监听 80，
 `server_name` 是订阅域名），acme.sh 以 `--webroot /var/www/acme` 写入挑战文件，签发 EC-256
@@ -313,7 +313,8 @@ tools/deploy.sh --rollback /root/sub-aggregator-backup-<时间戳>-<pid>
 - `/etc/nginx/conf.d/private-sub.conf` 不从备份恢复，而是用恢复后的 `sub-manager` 按当前
   订阅状态 `resync` 重建，已撤销或轮换掉的路径不会重新生效；不会删除
   `/etc/sub-manager/clients.json`；
-- 恢复出的 acme.sh 配置是 standalone、而 80 端口仍被占用时，给出提示（续期会失败）；
+- 恢复出的 acme.sh 配置是 standalone 而 80 端口仍被占用、或是 alpn（443 由 Xray 占用）时，
+  给出提示（续期会失败）；
 - `nginx -t`、`resync` 等检查有未通过的，以非 0 退出。
 
 如果启用了规则定时器，回滚后手工执行：
@@ -389,8 +390,8 @@ tools/uninstall.sh
 - **证书签发失败**：确认域名的 A/AAAA 记录指向本机、公网 80 端口可达（安全组 / 防火墙），
   且 `nginx -t` 通过。Let's Encrypt 对同一域名有频率限制，失败后不要连续重试。已有证书想
   手动放置时用 `--cert-dir` 指定目录，或加 `--no-issue-cert` 让脚本只检查。
-- **通过 sudo 运行**：`sudo tools/deploy.sh` 需要签发证书时，脚本在做任何改动之前就拒绝，
-  因为 acme.sh 在这种方式下拒绝签发。先 `sudo -i` 进入 root shell，再运行脚本。
+- **通过 sudo 运行**：需要签发证书时脚本会拒绝，先 `sudo -i` 进入 root shell 再运行；原因见
+  [certificates.md](certificates.md) §2.1。
 - **续期失败**：`/root/.acme.sh/acme.sh --list` 看下次续期时间；确认
   `/etc/nginx/conf.d/acme-challenge.conf` 生效（`nginx -T | grep -A5 acme-challenge`），且
   Nginx worker 能读 `/var/www/acme`。续期方式不是 webroot 时重跑部署脚本，按
@@ -398,7 +399,9 @@ tools/uninstall.sh
 - **改域名**：`--domain <新域名>` 重装时，所有设备的订阅地址都要换成新域名重新配置；脚本在
   摘要里标出域名变更，并为新域名找证书或签发。`acme-challenge.conf` 只为新域名提供挑战路径，
   旧域名的证书如果仍由 acme.sh webroot 续期（例如面板还在用），续期会失败：把面板也换到新
-  域名的证书，或改用别的续期方式。
+  域名的证书，或改用别的续期方式。已有订阅的原始订阅地址仍指向旧域名：在 3x-ui 改好订阅
+  域名后，对每条订阅执行 `sub-manager update <编号>`；在此之前 `/etc/hosts` 保留旧域名的
+  `127.0.0.1` 映射，并加上新域名的映射（§3.5）。
 - **域名推导不对**：3x-ui 里配了多个证书或面板/订阅用了不同域名时，推导会停在第一个匹配项
   或退回询问。直接加 `--domain` 明确指定，不要依赖推导。
 - **`add --from-xui` 读不到数据库**：确认 `x-ui.service` 在运行、`sqlite3` 已安装、

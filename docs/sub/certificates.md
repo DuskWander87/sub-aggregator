@@ -58,8 +58,9 @@ acme.sh --issue
   一次，让证书和后续续期都落到这个 CA 上。staging 证书也会被重签。
 - **重签失败**：脚本把 acme.sh 的续期配置还原为部署前的版本并中止，现有证书不变。确认域名
   解析和 80 端口后重跑；不想换 CA 时按 §4 把现有证书装到证书目录，加 `--no-issue-cert` 重跑。
-- **sudo**：通过 `sudo tools/deploy.sh` 直接运行时，acme.sh 会拒绝签发；脚本在做任何改动
-  之前就拒绝，并提示先 `sudo -i` 进入 root shell。
+- **sudo**：通过 `sudo tools/deploy.sh` 直接运行时，acme.sh 会拒绝签发；需要签发时脚本在
+  preflight 就拒绝，不备份、不安装任何聚合层文件（缺依赖时依赖已在这之前装好），并提示先
+  `sudo -i` 进入 root shell。
 
 acme.sh 的 conf 不能当作证书来源的证据：跳过签发时它不写 conf，签发失败时却已在下单前写了
 `Le_API` / `Le_Webroot`。原因见 [incidents.md](incidents.md)
@@ -106,6 +107,10 @@ x-ui、不碰 443；完整 hook 在安装之后写回 acme.sh 的 conf，续期�
 | `no`（standalone）、`alpn`、`apache`、`stateless`、`nginx`、`nginx:*`、其他目录 | 原文件保留为 `.conf.orig`，改为 `/var/www/acme` |
 | 其他 | 警告「未识别」，不动 |
 
+证书还包含其他域名（`Le_Alt` 不是 `no`）时不改写，只警告：80 端口的挑战路径只服务订阅域名，
+改成 webroot 会让其余域名的验证失败。证书本身已由 Let's Encrypt 签发、而 conf 的 `Le_API` 仍
+指向别的 CA 时，脚本把 `Le_API` 对齐为 Let's Encrypt，否则 cron 会向旧 CA 续期。
+
 只有 acme.sh 的安装记录（`Le_RealFullChainPath` / `Le_RealKeyPath`）指向本证书目录时才对齐
 并写 hook。证书安装到别的目录时，脚本只警告：那份证书续期后不会更新 Nginx 用的文件。同一域名
 在 acme.sh 里同时有 RSA 与 ECC 两份配置时，脚本只管理 ECC 那份，并提示清理 RSA 那份。之后在
@@ -113,7 +118,8 @@ x-ui、不碰 443；完整 hook 在安装之后写回 acme.sh 的 conf，续期�
 
 **certbot。**证书目录在 `/etc/letsencrypt/live/<域名>/` 时，续期由 certbot 负责。脚本安装
 deploy hook `/etc/letsencrypt/renewal-hooks/deploy/sub-aggregator.sh`，内容按上面同样的规则
-包含 reload Nginx 和（需要时的）x-ui 重启。续期方式只检查、不改：
+包含 reload Nginx 和（需要时的）x-ui 重启。certbot 每续期一张证书都会执行这个目录下的全部
+脚本，hook 先比较 `$RENEWED_LINEAGE`，只在本证书续期时动作。续期方式只检查、不改：
 `/etc/letsencrypt/renewal/<名称>.conf` 是 `authenticator = standalone`，或 webroot 不是
 `/var/www/acme` 时，脚本警告并给出命令：
 
