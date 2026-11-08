@@ -26,13 +26,16 @@
 
 set -uo pipefail
 
-REPO_DIR=/root/code/shadowrocket-config
-PUBLISH_DIR=/var/lib/sub-rules
-BASE="https://sub.example.com:8443/r/<RULES_PREFIX>"
+# 路径常量一律写成 readonly NAME="/..."：tools/selftest.sh 靠这个格式把它们挪进沙箱，
+# 其余代码里不要再写系统绝对路径。
+readonly REPO_DIR="/root/code/shadowrocket-config"
+readonly PUBLISH_DIR="/var/lib/sub-rules"
+readonly BASE="https://sub.example.com:8443/r/<RULES_PREFIX>"
 FILES=(ChinaDirect Reject)
-STAMP="$PUBLISH_DIR/.last-sync"
-NGINX_RULES_CONF=/etc/nginx/snippets/sub-rules.conf
-NGINX_UPSTREAM_CONF=/etc/nginx/snippets/sub-rules-upstream.conf
+readonly STAMP="$PUBLISH_DIR/.last-sync"
+readonly NGINX_RULES_CONF="/etc/nginx/snippets/sub-rules.conf"
+readonly NGINX_UPSTREAM_CONF="/etc/nginx/snippets/sub-rules-upstream.conf"
+readonly RULESETS="/opt/subconverter-classic/snippets/rulesets.txt"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -211,7 +214,7 @@ done
 
 echo
 echo "订阅中的引用："
-grep -E 'sub\.example\.com:8443/r/<RULES_PREFIX>/' /opt/subconverter-classic/snippets/rulesets.txt \
+grep -E 'sub\.example\.com:8443/r/<RULES_PREFIX>/' "$RULESETS" \
     | sed 's/^/  /' || echo "  未在 rulesets.txt 中找到自托管 URL"
 
 echo

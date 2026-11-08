@@ -5,6 +5,8 @@
 # /tmp/sub-aggregator-selftest-XXXXXX/sysroot，再在子 shell 里 source 副本，
 # 只调用下面 case 用到的函数；acme.sh、systemctl、nginx、ss 等一律是桩。
 # 副本生成后先做安全断言，任何一条不满足就以 99 退出，一个用例也不运行。
+# sub-rules-check 是独立脚本，副本作为子进程整体运行，curl 换成按 URL 返回固定响应
+# 的桩；它的非注释行里除常量外不能出现真机路径，同样由安全断言检查。
 #
 # 新增用例前先确认被测函数只使用文件顶部的常量路径，函数体里没有硬编码的
 # 系统绝对路径；否则沙箱挡不住它。不要调用 main、install_files、setup_rules、
@@ -24,8 +26,11 @@ readonly COPY_DIR="$SANDBOX/repo/tools"
 readonly DEPLOY_COPY="$COPY_DIR/deploy.sh"
 readonly UNINSTALL_COPY="$COPY_DIR/uninstall.sh"
 readonly SUB_MANAGER_COPY="$SANDBOX/repo/server/sbin/sub-manager"
+readonly RULES_CHECK_COPY="$SANDBOX/repo/server/sbin/sub-rules-check"
 readonly CA_DIR="$SANDBOX/ca"
 readonly STUB_BIN="$SANDBOX/bin"
+readonly RC_BIN="$SANDBOX/rc-bin"
+readonly RC_FIX="$SANDBOX/rc-fix"
 readonly XUI_DIR="$SANDBOX/xui"
 readonly D="sub.test"
 readonly ACME="$ROOT/root/.acme.sh"
@@ -98,6 +103,17 @@ st_assert_copy() {
     ) ) || true
     if [[ -n $bad ]]; then
         printf '安全断言失败：%s 的常量不在沙箱里：\n%s\n' "$copy" "$bad" >&2; exit 99
+    fi
+}
+
+# 作为子进程运行的副本没有 source 后的取值检查兜底：常量以外的非注释行里也不能出现
+# 真机路径，否则沙箱挡不住它。
+st_assert_runnable_copy() {
+    local hits
+    hits=$(grep -nE '(^|[^A-Za-z0-9_./-])/(etc|usr|opt|var|root|srv|home)/' "$1" \
+        | grep -vE '^[0-9]+:[[:space:]]*#')
+    if [[ -n $hits ]]; then
+        printf '安全断言失败：%s 的非注释行仍有指向真机的路径：\n%s\n' "$1" "$hits" >&2; exit 99
     fi
 }
 
@@ -1054,6 +1070,136 @@ t35() {
         eval '[[ $(grep -c "反代 GitHub" <<<"$fresh") == 2 && $(grep -c "^沿用" <<<"$dir") == 2 && $(grep -c "^沿用" <<<"$timer") == 2 ]] && lacks "$dir$timer" "反代 GitHub"'
 }
 
+# ---------- sub-rules-check ----------
+
+# 仓库 sub-rules.conf 里 proxy_pass 指向的 GitHub 目录；默认部署的比对地址必须取自它。
+readonly RC_GH="https://raw.githubusercontent.com/DuskWander87/shadowrocket-config/main/rules"
+
+# curl 桩，只在 run_rules_check 的 PATH 里。响应取自 $RC_FIX/<ep|gh>/<文件名>.{code,hdr,body}：
+# ep 是本站规则端点，gh 是 GitHub 原文；没有 .code 时按连接失败处理（http_code 000，
+# 退出 7）。请求过的 URL 依次记在 $RC_FIX/urls.log。
+st_write_curl_stub() {
+    install -d -m 0755 "$RC_BIN"
+    printf '#!/usr/bin/env bash\nfix=%q\n' "$RC_FIX" >"$RC_BIN/curl"
+    cat >>"$RC_BIN/curl" <<'EOF'
+out="" hdr="" fmt="" fail=0 url=""
+while (($#)); do
+    case $1 in
+        -o) out=$2; shift 2 ;;
+        -D) hdr=$2; shift 2 ;;
+        -w) fmt=$2; shift 2 ;;
+        --max-time) shift 2 ;;
+        --*) shift ;;
+        -*) [[ $1 == *f* ]] && fail=1; shift ;;
+        *) url=$1; shift ;;
+    esac
+done
+printf '%s\n' "$url" >>"$fix/urls.log"
+case $url in
+    https://raw.githubusercontent.com/*) side=gh ;;
+    *) side=ep ;;
+esac
+base="$fix/$side/${url##*/}"
+code=000
+[[ -f $base.code ]] && code=$(<"$base.code")
+[[ $fmt == *http_code* ]] && printf '%s' "$code"
+[[ $code == 000 ]] && exit 7
+if [[ -n $hdr ]]; then
+    { printf 'HTTP/1.1 %s Stub\r\n' "$code"; sed 's/$/\r/' "$base.hdr" 2>/dev/null; printf '\r\n'; } >"$hdr"
+fi
+if [[ -n $out ]]; then cat -- "$base.body" >"$out" 2>/dev/null; fi
+(( fail && code >= 400 )) && exit 22
+exit 0
+EOF
+    chmod 0755 "$RC_BIN/curl"
+}
+
+# rc_fixture <ep|gh> <文件名> <HTTP 状态码> <正文> [响应头...]
+rc_fixture() {
+    local side=$1 name=$2 code=$3 body=$4
+    shift 4
+    install -d -m 0755 "$RC_FIX/$side"
+    printf '%s\n' "$code" >"$RC_FIX/$side/$name.code"
+    printf '%s' "$body" >"$RC_FIX/$side/$name.body"
+    printf '%s\n' "$@" >"$RC_FIX/$side/$name.hdr"
+}
+
+# 每个用例的起点是默认部署：没有发布目录，定时器 disabled / inactive。Nginx 片段和
+# rulesets.txt 用仓库原件，比对地址因此取自真实的 sub-rules.conf。
+rc_reset() {
+    st_reset
+    rm -rf -- "$RC_FIX"
+    install -d -m 0755 "$RC_FIX" "$ROOT/etc/nginx/snippets" "$ROOT/opt/subconverter-classic/snippets"
+    cp -- "$REPO"/server/nginx/snippets/sub-rules*.conf "$ROOT/etc/nginx/snippets/"
+    cp -- "$REPO/server/subconverter/snippets/rulesets.txt" "$ROOT/opt/subconverter-classic/snippets/"
+    st_canned is-enabled sub-rules-sync.timer disabled
+    st_canned is-active sub-rules-sync.timer inactive
+}
+
+# run_rules_check ：作为子进程运行 sub-rules-check 副本，curl 桩排在 PATH 最前。
+run_rules_check() {
+    OUT=$(PATH="$RC_BIN:$PATH" bash "$RULES_CHECK_COPY" 2>&1)
+    RC=$?
+}
+
+rc_lines() { grep -E '^(ChinaDirect|Reject)\.list ' <<<"$OUT" | paste -sd '|' -; }
+
+t36() {
+    local f urls
+    rc_reset
+    for f in ChinaDirect Reject; do
+        rc_fixture ep "$f.list" 200 $'DOMAIN-SUFFIX,example.cn\n' 'X-Rule-Source: github' 'X-Rule-Cache: HIT'
+        rc_fixture gh "$f.list" 200 $'DOMAIN-SUFFIX,example.cn\n'
+    done
+    run_rules_check
+    urls=$(grep '^https://raw\.githubusercontent\.com/' "$RC_FIX/urls.log" 2>/dev/null | paste -sd ' ' -)
+    st_check T36 "sub-rules-check 默认部署：端点与 GitHub 一致时通过，比对地址取自 sub-rules.conf" \
+        "rc=0；两个文件端点=GitHub；比对 $RC_GH/ 下的两个文件" \
+        "rc=$RC urls=$urls $(rc_lines)" \
+        eval '(( RC == 0 )) && has "$OUT" "默认：端点反代 GitHub" && [[ $(grep -c "端点=GitHub" <<<"$OUT") == 2 && $urls == "$RC_GH/ChinaDirect.list $RC_GH/Reject.list" ]]'
+}
+
+t37() {
+    local diff down
+    rc_reset
+    rc_fixture ep ChinaDirect.list 200 $'DOMAIN-SUFFIX,old.cn\n' 'X-Rule-Source: github' 'X-Rule-Cache: HIT'
+    rc_fixture gh ChinaDirect.list 200 $'DOMAIN-SUFFIX,new.cn\n'
+    rc_fixture ep Reject.list 200 $'DOMAIN-SUFFIX,ad.com\n' 'X-Rule-Source: github' 'X-Rule-Cache: HIT'
+    rc_fixture gh Reject.list 200 $'DOMAIN-SUFFIX,ad.com\n'
+    run_rules_check
+    diff="rc=$RC $(rc_lines)"
+    # ChinaDirect：端点连不上、GitHub 正常；Reject：端点 404、GitHub 也没有。
+    rc_reset
+    rc_fixture gh ChinaDirect.list 200 $'DOMAIN-SUFFIX,example.cn\n'
+    rc_fixture ep Reject.list 404 'not found' 'X-Rule-Source: github'
+    run_rules_check
+    down="rc=$RC $(rc_lines)"
+    st_check T37 "sub-rules-check 默认部署：内容不一致报异常；端点不可用时分清本站与 GitHub" \
+        "rc=1，只有 ChinaDirect 报端点≠GitHub | rc=1，HTTP 000 提示 GitHub 正常、HTTP 404 提示 GitHub 也取不到" \
+        "$diff | $down" \
+        eval '[[ $diff == "rc=1 ChinaDirect.list"*"端点≠GitHub"*"|Reject.list"*"端点=GitHub"* && $down == "rc=1 ChinaDirect.list"*"HTTP 000"*"GitHub 原文正常"*"|Reject.list"*"HTTP 404"*"GitHub 上也取不到"* ]]'
+}
+
+t38() {
+    local f dir_rc dir_out timer_rc timer_out
+    rc_reset
+    install -d -m 0755 "$ROOT/var/lib/sub-rules"
+    for f in ChinaDirect Reject; do
+        rc_fixture ep "$f.list" 200 $'DOMAIN-SUFFIX,example.cn\n' 'X-Rule-Source: github' 'X-Rule-Cache: HIT'
+        rc_fixture gh "$f.list" 200 $'DOMAIN-SUFFIX,example.cn\n'
+    done
+    run_rules_check
+    dir_rc=$RC dir_out=$OUT
+    rm -rf -- "$ROOT/var/lib/sub-rules"
+    st_canned is-enabled sub-rules-sync.timer enabled
+    run_rules_check
+    timer_rc=$RC timer_out=$OUT
+    st_check T38 "sub-rules-check：有发布目录或定时器已启用时按 --with-rules 检查" \
+        "两次都按 --with-rules：rc=1，两个文件报兜底路径，不做 GitHub 比对" \
+        "rc=$dir_rc $(OUT=$dir_out rc_lines) | rc=$timer_rc $(OUT=$timer_out rc_lines)" \
+        eval '(( dir_rc == 1 && timer_rc == 1 )) && has "$dir_out" "--with-rules：" && has "$timer_out" "--with-rules：" && [[ $(grep -c "兜底路径" <<<"$dir_out") == 2 && $(grep -c "兜底路径" <<<"$timer_out") == 2 ]] && lacks "$dir_out$timer_out" "端点=GitHub"'
+}
+
 # ---------- 入口 ----------
 
 main() {
@@ -1065,7 +1211,11 @@ main() {
     install -d -m 0700 "$(dirname -- "$SUB_MANAGER_COPY")"
     st_make_copy "$REPO/server/sbin/sub-manager" "$SUB_MANAGER_COPY" keep
     st_assert_copy "$SUB_MANAGER_COPY" keep
+    st_make_copy "$REPO/server/sbin/sub-rules-check" "$RULES_CHECK_COPY" keep
+    st_assert_copy "$RULES_CHECK_COPY" keep
+    st_assert_runnable_copy "$RULES_CHECK_COPY"
     st_write_path_stubs
+    st_write_curl_stub
     export PATH="$STUB_BIN:$PATH"
 
     st_gen_ca le "/C=US/O=Let's Encrypt/CN=Test LE"
@@ -1104,6 +1254,9 @@ main() {
     t33
     t34
     t35
+    t36
+    t37
+    t38
 
     printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
     (( FAILED == 0 ))
