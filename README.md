@@ -109,7 +109,7 @@ tools/deploy.sh --with-rules
 | [3x-ui/troubleshooting.md](docs/3x-ui/troubleshooting.md) | 节点不通时，一次完整的排查过程 |
 | [docs/sub/README.md](docs/sub/README.md) | 查端口、路径和转换参数 |
 
-`server/` 是服务器上实际配置的脱敏副本，`tools/` 是部署、卸载和自测脚本。
+`server/` 是 `tools/deploy.sh` 装到服务器上的配置，也是作者服务器实际配置的脱敏副本：域名等真实值用占位符代替，部署时替换。`tools/` 是部署、卸载和自测脚本。
 
 ## 许可与致谢
 

@@ -141,6 +141,8 @@ http://127.0.0.1:25500/sub
   `|📊<剩余流量>`。**节点名必须恒定**，否则 Mihomo 无法还原手动选择。见
   [incidents.md](incidents.md) `2026-08-11`。3x-ui 若改变备注格式（例如不再使用 `|📊`
   前缀），这条正则要同步调整；正则失效时 `sub-manager test` 会因节点名残留流量后缀而报错。
+  URL 里的 `rename` 会整体替换 `pref.ini` 的 `rename_node`，所以节点改名规则只写在这里，
+  写进 `pref.ini` 不会生效。
 - `emoji=true`：拿节点备注去匹配 `snippets/emoji.txt` 的正则表（国家/城市
   关键词），命中就在名字前贴国旗。3x-ui 那边备注只写「美国」，输出成
   `🇺🇸 美国-<节点后缀>`，旗子是这张表自动加的。
@@ -159,18 +161,18 @@ http://127.0.0.1:25500/sub
 地址形态（每条订阅只有这一条）：
 
 ```text
-https://sub.example.com:8443/<48 位随机 hex>#DuskWander
+https://sub.example.com:8443/<48 位随机 hex>#DuskWander87
 ```
 
 `sub-manager list` 直接输出带 fragment 的完整地址，整条粘进客户端即可。
 
-客户端订阅卡片上显示的名称当前是 `DuskWander`。服务器侧只有一个命名来源，客户端侧另有一处：
+客户端订阅卡片上显示的名称当前是 `DuskWander87`。服务器侧只有一个命名来源，客户端侧另有一处：
 
 | 取名方 | 名称来源 | 改哪里 |
 |---|---|---|
 | Clash 家族 | Nginx 的 `Content-Disposition` 响应头 | `sub-manager` 的常量 `PROFILE_NAME`，改完 `resync` |
 | 3x-ui 原生分支 | Nginx 覆盖过的 `Profile-Title` 响应头（值带 `base64:` 前缀） | 同上，`resync` 后两个分支一起变 |
-| Shadowrocket | **URL fragment `#DuskWander`**，服务器完全管不着 | 客户端里手工填，或粘贴 `list` 输出的完整地址 |
+| Shadowrocket | **URL fragment `#DuskWander87`**，服务器完全管不着 | 客户端里手工填，或粘贴 `list` 输出的完整地址 |
 
 前两处都由 `PROFILE_NAME` 生成：Clash 分支的响应由 subconverter 拼装，原生分支则在 Nginx 层
 把上游的 `Profile-Title` 覆盖掉，因此改一个常量跑一次 `resync` 即可。3x-ui 面板的「订阅标题」

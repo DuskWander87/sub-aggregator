@@ -165,7 +165,7 @@ grep -rn 'sub.example.com\|<RULES_PREFIX>\|DuskWander\|shadowrocket-config' serv
 | `<RULES_PREFIX>` | 规则端点前缀，可用 `openssl rand -hex 12` 生成 | `sub-rules.conf`、`rulesets.txt`、`sub-rules-check` |
 | `/root/cert/sub.example.com/` | 证书目录 | `sub-manager` |
 | `8443` | 订阅入口端口 | `sub-manager` 的 `PORT`、`rulesets.txt`、`sub-rules-check` |
-| `DuskWander` | 订阅显示名 | `sub-manager` 的 `PROFILE_NAME`（两个分支同源，不必改面板） |
+| `DuskWander87` | 订阅显示名 | `sub-manager` 的 `PROFILE_NAME`（两个分支同源，不必改面板） |
 | `DuskWander87/shadowrocket-config` | 规则仓库（Nginx 反代目标） | `sub-rules.conf` |
 | `/root/code/shadowrocket-config` | 规则仓库的本机工作副本 | `sub-rules-check`、`sub-rules-sync`、`sub-rules-sync.service` |
 

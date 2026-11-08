@@ -96,13 +96,15 @@ README §3.1。
 ## `server/` 公开镜像
 
 `server/` 是把本机四类配置（`sbin/`、`nginx/`、`subconverter/`、`systemd/`）收进仓库的**脱敏
-拷贝**，与 `docs/` 一起对外发布。CLAUDE.md 也随仓库版本化，因此本文件同样遵守脱敏规则：
-不写真实域名、订阅路径与客户端名。改真机对应文件时同步 `server/` 的同名文件，并把真实值换回
-占位符：真实域名 → `sub.example.com`、规则前缀 24 位 hex → `<RULES_PREFIX>`、证书路径 →
-`/root/cert/sub.example.com/`。
-`PROFILE_NAME=DuskWander` 与 Nginx 规则反代的 `DuskWander87/shadowrocket-config` 是作者实际值，
-原样保留（与公开 docs 对齐）。`pref.ini` 活跃引用的自维护 snippet（`groups.txt`、`rulesets.txt`、
-`emoji.txt`、`rename_node.txt`）必须一起镜像，否则公开副本不自洽。
+拷贝**，与 `docs/` 一起对外发布。它同时是 `tools/deploy.sh` 的安装源：部署时整个复制出来、
+替换占位符后装到真机，所以改 `server/` 会改变下一次部署的结果。CLAUDE.md 也随仓库版本化，
+因此本文件同样遵守脱敏规则：不写真实域名、订阅路径与客户端名。改真机对应文件时同步
+`server/` 的同名文件，并把真实值换回占位符：真实域名 → `sub.example.com`、规则前缀 24 位
+hex → `<RULES_PREFIX>`、证书路径 → `/root/cert/sub.example.com/`。
+`PROFILE_NAME=DuskWander87` 与 Nginx 规则反代的 `DuskWander87/shadowrocket-config` 是作者实际值，
+原样保留（与公开 docs 对齐）。`deploy.sh` 按这两个字面量做替换，改其中任何一个都要同步
+`apply_placeholders`（显示名由 `tools/selftest.sh` 的 T39 把关）。`pref.ini` 活跃引用的 snippet
+（`groups.txt`、`rulesets.txt`、`emoji.txt`）必须一起镜像，否则公开副本不自洽。
 
 ## 关键操作
 
@@ -168,7 +170,8 @@ nginx -t
 
 - **节点名恒定**：3x-ui 在备注后追加 `|📊<剩余流量>`，靠 `CONVERT_OPTS` 的
   `rename=\|📊.*@` 剥掉。Mihomo 以节点名为键还原选择，名字变了就回落到策略组第一项；
-  3x-ui 改备注格式时，这条正则要同步调整。incidents `2026-08-11`
+  3x-ui 改备注格式时，这条正则要同步调整。改名规则只能写在 `CONVERT_OPTS`：URL 的 `rename`
+  会整体替换 `pref.ini` 的 `rename_node`。incidents `2026-08-11`
 - **旗子后的空格去不掉**：subconverter 贴旗时硬编码 `旗子 + " " + 原名`，`[emojis]` 没有
   分隔符开关；唯一替代是 `emoji=false` + 手工 `rename`，代价见 design §6.2，机制见
   README §3.3。策略组名 `🚀节点选择` 是另一回事：改它要同步 `groups.txt`、
@@ -220,6 +223,9 @@ nginx -t
   把它当主因。incidents `2026-08-19` 被排除的方向
 - **`rule-providers` 必须带 `format: text`**：由 Nginx `sub_filter` 注入，缺了国内规则集
   不生效。incidents `2026-08-08 rule-providers 缺 format: text`
+- **`managed_config_prefix` 不能删也不能留空**：它在 `pref.ini` 里看起来只给 Surge 用，实际是
+  `expand=false` 输出 `RULE-SET` + `rule-providers` 的前提，缺了规则会逐条内联成 10000+ 行。
+  见 design §8
 - **Reality 目标站必须端到端实测**：`xray tls ping` / `curl` 只证明普通 TLS 可用，不证明
   适合做 Reality 目标。troubleshooting §4.5、§5
 - **分层定位**：服务 → TCP → TLS → Reality → VLESS → 出站；前一层通不代表后一层通。

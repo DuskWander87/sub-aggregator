@@ -1028,6 +1028,26 @@ t33() {
         eval '(( RC == 0 && sm == 1 && rs == 2 && rc >= 1 )) && [[ -z $left ]]'
 }
 
+# 显示名的替换模式写死在 deploy.sh 里，和 server/ 里的值必须逐字一致；对不上时
+# replace_literal 不报错，--profile-name 会悄悄失效。
+t39() {
+    st_reset
+    local work="$SANDBOX/stage" sm="" const_hits usage_hits token_left repo_hits
+    rm -rf -- "$work"
+    install -d -m 0700 "$work"
+    cp -a "$REPO/server/." "$work/server/"
+    run_deploy b_placeholders "$work"
+    sm="$work/server/sbin/sub-manager"
+    const_hits=$(grep -c '^readonly PROFILE_NAME="X"$' "$sm")
+    usage_hits=$(grep -c '例如 #X。' "$sm")
+    token_left=$(grep -c 'DuskWander' "$sm")
+    repo_hits=$(grep -c 'DuskWander87/shadowrocket-config' "$work/server/nginx/snippets/sub-rules.conf")
+    st_check T39 "--profile-name 替换 PROFILE_NAME 常量与用法示例，不误伤规则仓库名" \
+        "常量 1 处；用法 1 处；sub-manager 无残留；sub-rules.conf 仓库名 2 处" \
+        "rc=$RC 常量=$const_hits 用法=$usage_hits 残留=$token_left 仓库名=$repo_hits $(oneline "$OUT")" \
+        eval '(( RC == 0 && const_hits == 1 && usage_hits == 1 && token_left == 0 && repo_hits == 2 ))'
+}
+
 b_main_bad_port() {
     collect_missing_dependencies() { MISSING_COMMANDS=(nginx); MISSING_PACKAGES=(nginx); return 0; }
     install_dependencies() { printf 'INSTALLED=1\n'; }
@@ -1257,6 +1277,7 @@ main() {
     t36
     t37
     t38
+    t39
 
     printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
     (( FAILED == 0 ))

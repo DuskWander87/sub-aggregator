@@ -449,6 +449,13 @@ tun:
 `rule-providers`，配置在 200 行以内。若不加 `expand=false`，subconverter 会把远程规则集展开
 为逐条内联规则（DOMAIN-SUFFIX、IP-CIDR 等），配置会膨胀到 10000 行以上。
 
+还有一个不显然的前提：`pref.ini` 的 `managed_config_prefix` 必须非空。它所在的
+`[managed_config]` 段按上游注释是给 Surge 用的，但 subconverter 只在它非空时才为 Clash 生成
+`rule-providers`；删掉或留空，即使带着 `expand=false`，规则也会重新逐条内联（实测 `RULE-SET`
+从 11 条变为 0 条）。值本身不进 Clash 配置：`clash-classic:` 的 URL 原样写进
+`rule-providers`，客户端不会去连 `127.0.0.1:25500`。`sub-manager` 校验输出必须含
+`rule-providers:` 与 `RULE-SET,`，误改后 `add` / `update` / `test` 会直接报错。
+
 规则集配置（`snippets/rulesets.txt`）：
 
 ```text

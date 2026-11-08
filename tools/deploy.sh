@@ -904,10 +904,11 @@ apply_placeholders() {
     replace_in_files 'sub.example.com' "$DOMAIN"
     replace_in_files '<RULES_PREFIX>' "$RULES_PREFIX"
 
-    # 只改 PROFILE_NAME 常量和用法示例，避免误伤 DuskWander87。
-    replace_literal "$stage/sbin/sub-manager" 'PROFILE_NAME="DuskWander"' \
+    # 只改 sub-manager 里的 PROFILE_NAME 常量和用法示例：DuskWander87 同时是规则仓库
+    # DuskWander87/shadowrocket-config 的账号名，不能全局替换。
+    replace_literal "$stage/sbin/sub-manager" 'PROFILE_NAME="DuskWander87"' \
         "PROFILE_NAME=\"$PROFILE_NAME\""
-    replace_literal "$stage/sbin/sub-manager" '#DuskWander' "#$PROFILE_NAME"
+    replace_literal "$stage/sbin/sub-manager" '#DuskWander87' "#$PROFILE_NAME"
 
     if [[ -n $RULES_REPO && $RULES_REPO != "$DEFAULT_RULES_REPO" ]]; then
         replace_in_files "$DEFAULT_RULES_REPO" "$RULES_REPO"
