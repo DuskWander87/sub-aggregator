@@ -113,4 +113,4 @@ tools/deploy.sh --with-rules
 
 ## 许可与致谢
 
-[MIT](LICENSE) © 2026 DuskWander。建立在 [3x-ui](https://github.com/MHSanaei/3x-ui)、[subconverter](https://github.com/tindy2013/subconverter) 与 [Mihomo](https://github.com/MetaCubeX/mihomo) 之上。
+[MIT](LICENSE) © 2026 DuskWander87。建立在 [3x-ui](https://github.com/MHSanaei/3x-ui)、[subconverter](https://github.com/tindy2013/subconverter) 与 [Mihomo](https://github.com/MetaCubeX/mihomo) 之上。
