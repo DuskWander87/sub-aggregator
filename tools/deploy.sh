@@ -822,7 +822,7 @@ print_plan() {
     $BACKUP_DIR
 
   规则发布:
-    $(if [[ $WITH_RULES -eq 1 ]]; then echo "启用 sub-rules-sync.timer（工作副本不存在时自动克隆 $RULES_REPO）"; else echo "本次不启用（Clash 分支仍含规则表，自维护列表由服务器侧回源 GitHub 兜底，客户端只连 $SUB_PORT）"; fi)
+    $(if [[ $WITH_RULES -eq 1 ]]; then echo "启用 sub-rules-sync.timer（工作副本不存在时自动克隆 $RULES_REPO）"; else echo "本次不启用（Clash 分支仍含规则表，自维护列表由 Nginx 反代 GitHub 提供，客户端只连 $SUB_PORT）"; fi)
 EOF
 }
 
@@ -838,7 +838,7 @@ print_summary() {
     if [[ $WITH_RULES -eq 1 ]]; then
         rules_state="启用 sub-rules-sync.timer（本机发布）"
     else
-        rules_state="本次不启用（Clash 分支仍含规则表，服务器侧回源 GitHub 兜底，客户端只连 $SUB_PORT）"
+        rules_state="本次不启用（Clash 分支仍含规则表，自维护列表由 Nginx 反代 GitHub 提供，客户端只连 $SUB_PORT）"
     fi
     cat <<EOF
 部署配置

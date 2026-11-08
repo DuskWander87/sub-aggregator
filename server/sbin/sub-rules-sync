@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 把自维护的 Clash 规则列表从本地 git 工作副本发布到 Nginx 可读的目录。
 #
-# 由 sub-rules-sync.timer 每分钟调用，也可手工执行（push 后想立刻生效时）。
+# 只在 deploy.sh --with-rules 时启用：由 sub-rules-sync.timer 每分钟调用，也可手工
+# 执行（push 后想立刻生效时）。默认部署不克隆仓库、不建发布目录，规则端点直接反代
+# GitHub，用不到本脚本。
 #
 # 设计要点：
 #   - 拉取用 fetch + merge --ff-only：分叉或本地有未提交改动时**拒绝**而不是销毁，

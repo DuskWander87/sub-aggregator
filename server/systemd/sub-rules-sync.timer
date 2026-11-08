@@ -3,7 +3,8 @@ Description=Periodically sync self-maintained rule lists
 Documentation=https://github.com/DuskWander87/sub-aggregator/blob/main/docs/sub/operations.md
 
 [Timer]
-# 开机后 30s 跑一次，之后每分钟一次。规则端点直接 serve 发布目录里的文件，
+# 只在 deploy.sh --with-rules 时启用，默认部署只装不启用。
+# 开机后 30s 跑一次，之后每分钟一次。启用后规则端点直接 serve 发布目录里的文件，
 # 因此「push 到生效」的延迟上限就是这个周期。
 OnBootSec=30s
 OnUnitActiveSec=1min

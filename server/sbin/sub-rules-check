@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# 诊断自维护规则集的整条分发链是否一致、同步器是否健康。
+# 诊断自维护规则集的分发链是否一致。先按部署方式判断该查哪一条链：
 #
-# 链路（2026-08-19 起）：
+# 默认部署（deploy.sh 不加 --with-rules）：
+#   GitHub（raw.githubusercontent.com）
+#     └─ Nginx @sub_rules_* 反代，本机缓存 30 秒
+#        └─ https://sub.example.com:8443/r/<RULES_PREFIX>/*.list   （X-Rule-Source: github）
+#   检查端点可用、内容含规则行，且与 GitHub 当前内容一致。push 后最长约 5.5 分钟
+#   才会一致（GitHub 边缘缓存 max-age=300，加本机 30 秒），期间报不一致属正常。
+#
+# --with-rules：
 #   GitHub origin/main
 #     └─ sub-rules-sync.timer 每分钟 fetch + ff-only 合并
 #        └─ /root/code/shadowrocket-config/rules/   （git 工作副本）
 #           └─ /var/lib/sub-rules/                （发布目录，nginx 直接 serve）
-#              └─ https://sub.example.com:8443/r/<RULES_PREFIX>/*.list
+#              └─ https://sub.example.com:8443/r/<RULES_PREFIX>/*.list   （X-Rule-Source: local）
+#   端点无缓存层，客户端单次拉取即拿到发布目录的当前内容。发布目录缺文件时
+#   才落到 GitHub 反代兜底（X-Rule-Source: github），按异常报告。
 #
-# 端点无缓存层，客户端单次拉取即拿到发布目录的当前内容。
-# 发布目录缺文件时才落到 GitHub 反代兜底（X-Rule-Source: github）。
+# 判定：发布目录存在，或 sub-rules-sync.timer 已启用 / 正在运行，按 --with-rules
+# 检查；否则按默认部署检查。只剩工作副本（例如卸载后保留的 git 仓库）不改变判定。
 #
 # 本脚本纯诊断，不修改任何状态：用 git ls-remote 查远端，不做 fetch。
 #
@@ -22,16 +31,48 @@ PUBLISH_DIR=/var/lib/sub-rules
 BASE="https://sub.example.com:8443/r/<RULES_PREFIX>"
 FILES=(ChinaDirect Reject)
 STAMP="$PUBLISH_DIR/.last-sync"
+NGINX_RULES_CONF=/etc/nginx/snippets/sub-rules.conf
+NGINX_UPSTREAM_CONF=/etc/nginx/snippets/sub-rules-upstream.conf
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 rc=0
 
-# ── 同步器状态 ──────────────────────────────────────────────────────────
+if [[ -d $PUBLISH_DIR ]] \
+        || systemctl is-enabled --quiet sub-rules-sync.timer 2>/dev/null \
+        || systemctl is-active --quiet sub-rules-sync.timer 2>/dev/null; then
+    mode=local
+else
+    mode=proxy
+fi
+
+# 反代实际回源的地址从 Nginx 配置里取，比对的就是 proxy_pass 拉的那一份；
+# deploy.sh --rules-repo 改的也是这里。
+upstream_host=$(sed -n 's/^[[:space:]]*set \$sub_rules_upstream "\([^"]*\)";.*/\1/p' \
+    "$NGINX_UPSTREAM_CONF" 2>/dev/null | head -n 1)
+upstream_host=${upstream_host:-raw.githubusercontent.com}
+
+upstream_url() {
+    local path
+    path=$(sed -n 's|^[[:space:]]*proxy_pass https://\$sub_rules_upstream/\([^;]*/'"$1"'\.list\);.*|\1|p' \
+        "$NGINX_RULES_CONF" 2>/dev/null | head -n 1)
+    [[ -n $path ]] && printf 'https://%s/%s\n' "$upstream_host" "$path"
+}
+
+# ── 部署方式与同步器状态 ─────────────────────────────────────────────────
 # 中文标签按显示宽度手工对齐（printf 的 %-Ns 按字节数补位，CJK 会算错）
+printf '%s ' "部署方式      "
+if [[ $mode == local ]]; then
+    printf -- '--with-rules：发布目录直接 serve，GitHub 反代兜底\n'
+else
+    printf '默认：端点反代 GitHub（未启用 --with-rules）\n'
+fi
+
 printf '%s ' "同步定时器    "
-if systemctl is-active --quiet sub-rules-sync.timer; then
+if [[ $mode == proxy ]]; then
+    printf '未启用（默认部署不需要）\n'
+elif systemctl is-active --quiet sub-rules-sync.timer; then
     if [[ -r $STAMP ]]; then
         age=$(( $(date -u +%s) - $(cat "$STAMP") ))
         if (( age > 300 )); then
@@ -51,7 +92,13 @@ fi
 
 # ── git 工作副本与远端 ───────────────────────────────────────────────────
 printf '%s ' "git 工作副本  "
-if [[ -d $REPO_DIR/.git ]]; then
+if [[ $mode == proxy ]]; then
+    if [[ -d $REPO_DIR/.git ]]; then
+        printf '存在但未使用：%s（默认部署不读它）\n' "$REPO_DIR"
+    else
+        printf '未使用（默认部署不需要）\n'
+    fi
+elif [[ -d $REPO_DIR/.git ]]; then
     local_sha=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)
     remote_sha=$(git -C "$REPO_DIR" ls-remote origin refs/heads/main 2>/dev/null | awk '{print $1}')
     dirty=$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | head -1)
@@ -76,11 +123,57 @@ fi
 echo
 
 # ── 逐个文件比对整条链 ───────────────────────────────────────────────────
+# 默认部署：端点 = GitHub。push 后的几分钟里两边可能不一致，见文件头。
+check_proxy_file() {
+    local f=$1 src=$2 cache=$3 lines=$4 url
+
+    if [[ $src != github ]]; then
+        printf '%s  %s 行  来源异常：默认部署应为 X-Rule-Source: github\n' "${src:-无来源头}" "$lines"
+        rc=1
+        return
+    fi
+    if ! grep -qE '^[A-Z][A-Z0-9-]*,' "$tmp/ep"; then
+        printf 'github %s 行  内容不含任何规则行（缓存 %s）\n' "$lines" "${cache:-?}"
+        rc=1
+        return
+    fi
+    url=$(upstream_url "$f")
+    if [[ -z $url ]]; then
+        printf 'github %s 行  在 %s 里找不到反代地址，无法比对\n' "$lines" "$NGINX_RULES_CONF"
+        rc=1
+        return
+    fi
+    if ! curl -sSf --max-time 20 "$url" -o "$tmp/gh" 2>/dev/null; then
+        printf 'github %s 行  取不到 GitHub 原文，无法比对（缓存 %s）\n' "$lines" "${cache:-?}"
+        rc=1
+        return
+    fi
+    if cmp -s "$tmp/ep" "$tmp/gh"; then
+        printf 'github %s 行  端点=GitHub（缓存 %s）\n' "$lines" "${cache:-?}"
+    else
+        printf 'github %s 行  端点≠GitHub（缓存 %s），push 后约 5.5 分钟内属正常，稍后重跑\n' \
+               "$lines" "${cache:-?}"
+        rc=1
+    fi
+}
+
 for f in "${FILES[@]}"; do
     printf '%-18s ' "${f}.list"
 
-    if ! curl -sSf --max-time 20 "${BASE}/${f}.list" -o "$tmp/ep" -D "$tmp/hdr" 2>/dev/null; then
-        echo "端点不可用"
+    code=$(curl -sS --max-time 20 "${BASE}/${f}.list" -o "$tmp/ep" -D "$tmp/hdr" \
+        -w '%{http_code}' 2>/dev/null)
+    if [[ $code != 200 ]]; then
+        printf '端点不可用（HTTP %s）' "${code:-000}"
+        # 默认部署再看一眼 GitHub，分清问题出在本站还是上游。
+        if [[ $mode == proxy ]]; then
+            url=$(upstream_url "$f")
+            if [[ -n $url ]] && curl -sSf --max-time 20 "$url" -o /dev/null 2>/dev/null; then
+                printf '，GitHub 原文正常：查是否已建订阅、Nginx 配置与缓存目录属主'
+            else
+                printf '，GitHub 上也取不到：查 --rules-repo、main 分支和 rules/ 下的文件名'
+            fi
+        fi
+        printf '\n'
         rc=1
         continue
     fi
@@ -88,6 +181,11 @@ for f in "${FILES[@]}"; do
     src=$(grep -i '^x-rule-source:' "$tmp/hdr" | tr -d '\r' | awk '{print $2}')
     cache=$(grep -i '^x-rule-cache:' "$tmp/hdr" | tr -d '\r' | awk '{print $2}')
     lines=$(grep -c '' "$tmp/ep")
+
+    if [[ $mode == proxy ]]; then
+        check_proxy_file "$f" "$src" "$cache" "$lines"
+        continue
+    fi
 
     if [[ $src == github ]]; then
         printf '兜底路径（GitHub 反代，缓存 %s，%s 行）—— 发布目录里没有这个文件\n' \
@@ -117,10 +215,12 @@ grep -E 'sub\.example\.com:8443/r/<RULES_PREFIX>/' /opt/subconverter-classic/sni
     | sed 's/^/  /' || echo "  未在 rulesets.txt 中找到自托管 URL"
 
 echo
-if (( rc == 0 )); then
+if (( rc != 0 )); then
+    echo "结论：存在异常，见上。"
+elif [[ $mode == local ]]; then
     echo "结论：分发链一致。push 后最多 1 分钟发布，客户端点一次「更新规则集」即最新。"
 else
-    echo "结论：存在异常，见上。"
+    echo "结论：规则端点正常。push 后最长约 5.5 分钟，客户端点「更新规则集」才能拿到新版本。"
 fi
 
 exit "$rc"
