@@ -338,12 +338,11 @@ rename 规则，漏了就没旗子。当前只有一个 inbound（备注「美�
 
 ### 7.1 设计目标
 
-参考用户 iOS Shadowrocket 配置的 DNS 设计原则，在 Mihomo 订阅中实现等效防泄漏：
-
 - 禁用 IPv6 DNS 解析，避免绕行。
-- 使用 Fake-IP 模式，减少实际 DNS 暴露。
-- 国内域名由国内加密 DNS 解析（腾讯 DoH、阿里 DoH）。
-- 国外域名由 Cloudflare/Google DoH 解析。
+- 境外域名默认不在本地解析：Fake-IP 给应用返回假地址，连接以域名交给节点，由节点远端解析。
+- 直连域名和代理节点域名由国内加密 DNS 解析（腾讯 DoH、阿里 DoH）。
+- 仍需本地解析的剩余查询（`fake-ip-filter` 中的境外域名、A/AAAA/HTTPS/SVCB 以外的记录类型）
+  由 Cloudflare/Google DoH 解析，经代理发出。
 - 代理节点域名使用专用解析器，避免 DNS 循环依赖。
 - TUN 模式劫持 UDP/TCP 53 端口，阻止应用绕过配置的 DNS。
 - 启用 strict-route 阻止多网卡 DNS 泄漏（Windows/Linux）。
@@ -366,9 +365,9 @@ dns:
     "geosite:cn,private,apple":
       - https://doh.pub/dns-query
       - https://dns.alidns.com/dns-query
-  nameserver:                          # 其余域名用 1.1.1.1/8.8.8.8 DoH
+  nameserver:                          # 剩余查询（见下）用 Cloudflare/Google DoH
     - https://1.1.1.1/dns-query        # 因 respect-rules，这些查询走代理节点发出
-    - https://8.8.8.8/dns-query        # ISP 完全看不到境外 DNS 查询
+    - https://8.8.8.8/dns-query
   proxy-server-nameserver:             # 代理节点域名用国内 DoH（防 ISP 嗅探）
     - https://doh.pub/dns-query
     - https://dns.alidns.com/dns-query
@@ -379,9 +378,20 @@ dns:
   fake-ip-filter: [...]                # 31 条过滤规则
 ```
 
-**防泄漏核心机制**：`respect-rules: true` 使 nameserver 中的 DoH 查询本身也按 Clash rules
-分流。`1.1.1.1` 和 `8.8.8.8` 不匹配任何国内规则，因此这些 DNS 查询通过代理节点发出，本地
-ISP 完全看不到任何境外域名的 DNS 请求。
+**防泄漏机制**：境外域名的主路径不经过本地 DNS。Fake-IP 对 A/AAAA 返回假地址、对
+HTTPS/SVCB 返回空应答，规则中的 IP 条目全带 `no-resolve`（见 §8.1），连接落 `MATCH` 后以
+域名交给节点远端解析。
+
+`nameserver` 只承接剩余查询：`fake-ip-filter` 中不属于 `geosite:cn,private,apple` 的域名
+（如 `lens.l.google.com`、`xboxlive.com`、STUN/NTP 域名），以及 MX、TXT、SRV 等其他记录
+类型。`respect-rules: true` 让 `nameserver` 与 `nameserver-policy` 的 DoH 连接本身也按 rules
+分流：`1.1.1.1`、`8.8.8.8` 不命中任何直连规则，经 `🚀节点选择` 发出，ISP 看不到；这也意味着
+该组选 `DIRECT` 时这部分查询会直连境外 DoH，在国内建连不稳。`proxy-server-nameserver`、
+`direct-nameserver`、`default-nameserver` 不受 `respect-rules` 影响，始终直连。
+
+`nameserver-policy` 的 `doh.pub`、`dns.alidns.com` 能走直连，靠的是它们在 ACL4SSR
+`ChinaDomain.list` 中。两者若从列表消失，国内域名会改由节点出口查询，CDN 按节点位置调度，
+国内站点变慢但不泄漏。
 
 ### 7.3 TUN 配置
 
@@ -422,7 +432,8 @@ tun:
 | Shadowrocket 能力 | Mihomo 等效 | 说明 |
 |---|---|---|
 | `dns-fallback-system = false` | TUN dns-hijack + strict-route | 系统 DNS 被拦截 |
-| `dns-direct-system = false` | proxy-server-nameserver | 直连/代理都不走系统 DNS |
+| `dns-server`（仅国内 UDP） | 国内 DoH（`nameserver-policy` / `direct-nameserver` / `proxy-server-nameserver`）+ 境外 DoH（`nameserver`） | Shadowrocket 实测中境外 DoH 从未参与查询（规则仓库 `docs/troubleshooting.md`），只留国内 UDP；Mihomo 靠 `respect-rules` 让境外 DoH 经代理发出 |
+| `dns-direct-system = false` | `direct-nameserver` | 直连域名不走系统 DNS |
 | `private-ip-answer = false` | 无直接等效 | Fake-IP 模式下不依赖真实 DNS 应答；geosite 分流降低风险 |
 | `force-remote-dns` | enhanced-mode: fake-ip | 外部域名不在本地解析 |
 | `udp-policy-not-supported-behaviour = REJECT` | 无直接字段 | Mihomo 原生支持 UDP 代理 |
@@ -500,6 +511,11 @@ rules:
 这避免了以下潜在泄漏场景：某个国外域名不在前面任何 RULE-SET 中 → 走到 GEOIP 时若触发 DNS
 解析 → 即使 `respect-rules` 生效由代理发出查询，也会增加不必要的延迟和复杂度。加
 `no-resolve` 后，只有连接本身已携带 IP 地址（如应用直连 IP）时才检查是否为国内 IP。
+
+规则集里的 IP 条目同样全部带 `no-resolve`（ACL4SSR 各列表与两个自维护列表均如此）。往
+`ChinaDirect.list` 加 IP 规则时也必须带上：规则集只要含一条不带 `no-resolve` 的 IP 规则，
+每个走到它的域名都会先本地解析一次；该列表同时被 Shadowrocket 引用，在那边会变成明文 DNS
+泄漏。
 
 未被 ChinaDomain 规则集覆盖的国内域名会走代理（极少数），代价是多绕一跳，但比 DNS 泄漏安全。
 
