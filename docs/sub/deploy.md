@@ -54,7 +54,8 @@ tools/deploy.sh
 4. 检查 x-ui 服务与数据库、443 入站、2096 监听、订阅端口和域名解析，并打印部署摘要。
    订阅端口被 Nginx 以外的进程占用时直接失败，提示用 `--port` 换端口；端口与已安装的
    不同时，摘要会标出端口变更。
-   3x-ui 只读不写；443 入站或 2096 收口不符合预期时给出警告。
+   3x-ui 只读不写；没有 443 入站、2096 未监听时给出警告。2096 未收口、域名未指向
+   `127.0.0.1` 时也会警告，这两条针对的是可选的收口（§3.5），不收口可以忽略。
 5. 确认后备份到 `/root/sub-aggregator-backup-<时间戳>-<pid>/`，把 `server/` 复制到临时目录
    并替换域名、证书目录、订阅端口、显示名、规则前缀和规则仓库。
 6. 安装 subconverter、管理脚本、systemd 单元、Nginx 片段、规则反代的缓存目录和 ACME 挑战路径；
@@ -76,8 +77,8 @@ tools/deploy.sh
 部署不创建订阅。订阅的前提是面板里已经有节点和客户端，这一步只能在面板里完成；脚本只
 把入口和命令打印出来，不打断安装，也不向 3x-ui 写入任何东西。
 
-脚本不会修改 3x-ui、Xray 或 443 入站，也不会改动你的仓库工作副本。2096 收口需要手工执行，
-见 §3.5。
+脚本不会修改 3x-ui、Xray 或 443 入站，也不会改动你的仓库工作副本。2096 收口是可选项，需要
+手工执行，见 §3.5。
 
 ### 2.2 预演与无人值守
 
@@ -285,22 +286,24 @@ tools/deploy.sh --with-rules --rules-repo <你的账号>/shadowrocket-config
 工作副本的路径、发布目录和反代缓存的设计见 [design.md](design.md) §9，日常更新见
 [operations.md](operations.md) §2。
 
-### 3.5 收口 2096
+### 3.5 收口 2096（可选）
 
-把 3x-ui 订阅服务限制到本机，同时让 subconverter 仍能按域名拉取原始订阅。部署脚本不会
-修改 3x-ui，这一步手工执行：
+3x-ui 订阅服务默认监听所有地址，原始订阅地址在公网可用。收口把它限制到本机，同时让
+subconverter 仍能按域名拉取原始订阅。收不收口的差别见
+[unified-subscription.md](unified-subscription.md) §6。部署脚本不会修改 3x-ui，这一步手工
+执行，顺序按下面来：先加映射再收口，Clash 分支全程不断。
 
 1. 备份 `/etc/x-ui/x-ui.db`。
-2. 在面板「设置 → 订阅 → Listen IP」填 `127.0.0.1`，或直接设置
-   `settings.key = 'subListen'`，值为 `127.0.0.1`。修改后重启 x-ui；443 上的 Xray 会随之
-   中断数秒。
-3. 在 `/etc/hosts` 增加一行，把订阅域名解析到回环地址：
+2. 在 `/etc/hosts` 增加一行，把订阅域名解析到回环地址，然后重启 subconverter：
 
    ```text
    127.0.0.1 sub.example.com
    ```
 
-4. 重启 subconverter，然后验证：
+3. 在面板「设置 → 订阅 → Listen IP」填 `127.0.0.1`，或直接设置
+   `settings.key = 'subListen'`，值为 `127.0.0.1`。修改后重启 x-ui；443 上的 Xray 会随之
+   中断数秒。
+4. 验证：
 
    ```bash
    ss -lntp | grep 2096     # 只应出现 127.0.0.1:2096
@@ -308,9 +311,8 @@ tools/deploy.sh --with-rules --rules-repo <你的账号>/shadowrocket-config
    sub-manager test
    ```
 
-没有第 3 步，Clash 分支会因 subconverter 连不上 2096 而报「本地转换失败」。回滚时把
-`subListen` 清空并重启 x-ui，`/etc/hosts` 的映射可以保留。细节见
-[unified-subscription.md](unified-subscription.md) §6。
+收口后若缺第 2 步的映射，Clash 分支会因 subconverter 连不上 2096 而报「本地转换失败」。回滚
+时把 `subListen` 清空并重启 x-ui，`/etc/hosts` 的映射可以保留。
 
 ## 4. 备份与回滚
 

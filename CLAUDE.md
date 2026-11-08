@@ -85,7 +85,7 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 |---|---|
 | `80` | Nginx（仅 ACME HTTP-01 挑战） |
 | `443` | Xray VLESS Reality（**不要碰**） |
-| `2096` | 3x-ui 原生订阅（仅 `127.0.0.1`；订阅入口原生分支的回源目标） |
+| `2096` | 3x-ui 原生订阅（订阅入口原生分支的回源目标；默认监听所有地址，收口到 `127.0.0.1` 可选，本机未收口） |
 | `8443` | Nginx（订阅入口 + 自维护规则端点；`deploy.sh --port` 的默认值，本机用默认） |
 | `25500` | Subconverter（**仅 `127.0.0.1`**） |
 
@@ -157,9 +157,9 @@ systemctl restart subconverter && sub-manager resync
 
 ```bash
 systemctl is-active x-ui subconverter nginx
-ss -lntp | grep -E ':(80|443|2096|8443|25500)\b'   # 2096 应只有 127.0.0.1
+ss -lntp | grep -E ':(80|443|2096|8443|25500)\b'   # 本机未收口，2096 监听所有地址；收口后只应有 127.0.0.1
 ss -lntp | grep x-ui                               # 面板端口随面板设置变化
-getent hosts sub.example.com                            # 占位符换成实际订阅域名；应返回 127.0.0.1
+getent hosts sub.example.com                            # 占位符换成实际订阅域名；收口后必须返回 127.0.0.1
 curl -fsS http://127.0.0.1:25500/version
 nginx -t
 ```
@@ -186,10 +186,12 @@ nginx -t
 - **`renumber` 只改编号**：`path`、源订阅和节点都不动，设备无需重配；但记住的旧编号会失效，
   之后的 `update` / `rotate` / `remove` 要用新编号。
 - **`rotate` / `remove` ≠ 收回节点访问**：`sub-manager` 对 x-ui / `*.db` 零写操作，它们只
-  作废分发通道，已拉取 profile 里的 UUID 仍然有效。真正踢人要去 3x-ui 删掉或更换该客户端的
-  UUID。见 unified-subscription §6。
-- **2096 收口依赖 `/etc/hosts`**：订阅域名必须解析到 `127.0.0.1`，否则 Clash 分支报「本地
-  转换失败」，原生分支正常。incidents `2026-10-18`
+  作废分发通道，已拉取 profile 里的 UUID 仍然有效。真正踢人要去 3x-ui 删掉该客户端或更换
+  UUID；2096 未收口时（本机即是）还要重置 `subId`，因为原生分支透传的 `Profile-Web-Page-Url`
+  会带出它。见 unified-subscription §6。
+- **2096 收口是可选项，本机未做**：收口后订阅域名必须解析到 `127.0.0.1`，否则 Clash 分支报
+  「本地转换失败」，原生分支正常。先加 `/etc/hosts` 映射再改 `subListen`，中间不会断。
+  incidents `2026-10-18`
 - **证书续期走 80 端口 webroot**：`acme-challenge.conf` 与 `/var/www/acme` 是续期链路的一部分；
   `sub-manager` 只读 `/root/cert/<域名>/` 的 `fullchain.pem` / `privkey.pem`，不参与签发。
   acme.sh 的 reload hook 必须包含 `systemctl reload nginx`，否则续期后 Nginx 继续发旧证书，

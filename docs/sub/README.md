@@ -6,7 +6,8 @@
 
 设计目标：
 
-- 客户端只看到聚合地址，看不到 3x-ui 原始订阅 URL。
+- 客户端只看到聚合地址，看不到 3x-ui 原始订阅 URL。例外是原生分支透传的
+  `Profile-Web-Page-Url`，它带着 `subId`，见 [unified-subscription.md](unified-subscription.md) §6。
 - 不使用第三方订阅转换、短链或配置托管服务。
 - 不影响现有 3x-ui、Xray 和 443 端口。
 - 适配只有 2GB 内存的服务器。
@@ -35,7 +36,7 @@ VLESS Reality 故障排查全过程，全文使用占位符，可公开分享。
 ```text
 任意客户端 -> HTTPS 订阅地址（Nginx :8443 /<48 位随机 hex>）
   -> Clash 家族 UA  -> 本机 Subconverter（127.0.0.1:25500）
-                       -> 3x-ui 原生订阅（127.0.0.1:2096）
+                       -> 3x-ui 原生订阅（按订阅域名拉取 :2096）
                        -> 返回完整 Clash YAML
   -> 其余一切       -> 原样透传 3x-ui 原生订阅（127.0.0.1:2096），一个字节都没动过
 ```
@@ -70,7 +71,7 @@ VLESS Reality 故障排查全过程，全文使用占位符，可公开分享。
 |---|---|---|
 | `80` | Nginx | 仅 ACME HTTP-01 挑战，其他路径 404 |
 | `443` | Xray VLESS Reality | 不要碰 |
-| `2096` | 3x-ui 原生订阅 | 仅 `127.0.0.1`；订阅入口原生分支的回源目标 |
+| `2096` | 3x-ui 原生订阅 | 订阅入口原生分支的回源目标；默认监听所有地址，本机未收口（见下） |
 | `8443` | Nginx | 订阅入口 + 自维护规则端点；默认值，部署时可用 `--port` 改 |
 | `25500` | Subconverter | 仅 `127.0.0.1` |
 
@@ -78,7 +79,9 @@ VLESS Reality 故障排查全过程，全文使用占位符，可公开分享。
 `ss -lntp | grep x-ui` 或 `x-ui settings` 查当前值；随机路径不写进文档。
 
 `2096` 来自面板的 `subPort` 设置（未设置时默认 2096），同样不是固定契约；改端口后同步更新
-本表。
+本表。它默认随 3x-ui 监听所有地址，原始订阅地址在公网可用（除非防火墙或云安全组挡住）。
+收口到 `127.0.0.1` 是可选项，部署脚本不做，步骤见 [deploy.md](deploy.md) §3.5，收不收口的
+差别见 [unified-subscription.md](unified-subscription.md) §6。本机未收口。
 
 443 已由 Xray Reality 占用，因此订阅入口默认用 `8443`，避免改动现有 Reality 入站或做复杂的
 SNI/fallback 分流。代价是 Clash 客户端会显示 `sub.example.com:8443`，那是从订阅 URL 解析出
@@ -176,8 +179,8 @@ https://sub.example.com:8443/<48 位随机 hex>#DuskWander87
 
 前两处都由 `PROFILE_NAME` 生成：Clash 分支的响应由 subconverter 拼装，原生分支则在 Nginx 层
 把上游的 `Profile-Title` 覆盖掉，因此改一个常量跑一次 `resync` 即可。3x-ui 面板的「订阅标题」
-不参与聚合入口的命名，留空也不影响：原生分支在 Nginx 层覆盖上游值，`2096` 又只监听回环，
-面板值没有其他消费者，命名只有一个需要人维护的入口。`sub-manager test` 对两个响应头各有一条
+不参与聚合入口的命名，留空也不影响：原生分支在 Nginx 层覆盖上游值，面板值只对直连 `2096`
+的客户端生效，聚合入口的命名只有一个需要人维护的入口。`sub-manager test` 对两个响应头各有一条
 断言，值不一致会报错。
 
 Shadowrocket 那行是客户端行为，不是服务器缺陷。实测（`incidents.md` `2026-08-22`）

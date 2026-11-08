@@ -145,7 +145,7 @@ sub-manager update sub-1
 1. 在 3x-ui 中重置对应客户端的 `subId` 或重新创建客户端。
 2. 执行 `sub-manager update <订阅编号>`，例如 `sub-manager update sub-1`。
 3. 隐藏输入新的原始订阅 URL。
-4. 直连 `2096` 的原生订阅地址在公网已不可达；仍在使用它的客户端要改用聚合地址。
+4. 旧的原始订阅地址随 `subId` 重置失效；仍在直连它的客户端要改用聚合地址。
 
 `subId` 重置后若忘了做第 2 步，`list` 会同时报两条漂移：新 `subId`「还没有聚合地址」，
 旧地址「已无对应客户端」。两条同时出现且数量相等，通常就是漏做 `update` 而不是真的增删了
@@ -176,7 +176,10 @@ sub-manager remove sub-1
 删除成功后，该订阅的地址立即返回 404，其他订阅不受影响。
 
 > `rotate` / `remove` 作废的只是配置分发通道。客户端已经拉到的配置不会消失，里面的 VLESS
-> UUID 仍然有效。要真正收回节点访问，去 3x-ui 面板删掉或更换该客户端的 UUID。
+> UUID 仍然有效。要真正收回节点访问，去 3x-ui 面板删掉该客户端或更换 UUID。2096 未收口时
+> （本机即是），拿到过聚合地址的人还能从原生分支的响应头读到 `subId`、直连原始订阅，所以
+> 聚合地址泄露也要按 §1.4 一并重置 `subId`。细节见
+> [unified-subscription.md](unified-subscription.md) §6。
 
 ### 1.6 测试
 
@@ -200,8 +203,6 @@ sub-manager resync
 
 不需要重新输入任何原始订阅，订阅编号和地址均保持不变。走与 `add`/`update` 完全相同的事务
 路径，见 §1.1。
-
-**例外**：若状态文件仍是 v1，这一步会触发 schema 升级，届时所有路径都会换新（见 §1.1）。
 
 没有订阅时，只要 `private-sub.conf` 存在，resync 照常按当前常量重建它；但状态文件缺失而
 `private-sub.conf` 还在时拒绝执行，因为按空状态重建会让所有订阅地址失效。resync 不重新拉取
@@ -312,10 +313,11 @@ ss -lntp | grep -E ':(80|443|2096|8443|25500)\b'
 ss -lntp | grep x-ui                                      # 面板端口随面板设置变化
 ```
 
-`2096` 应只出现 `127.0.0.1:2096`。域名解析供 subconverter 回源：
+`2096` 默认监听所有地址，本机如此。收口后（可选，见 [deploy.md](deploy.md) §3.5）应只出现
+`127.0.0.1:2096`，订阅域名也要解析到回环地址，供 subconverter 回源：
 
 ```bash
-getent hosts sub.example.com    # 应返回 127.0.0.1
+getent hosts sub.example.com    # 收口后应返回 127.0.0.1
 ```
 
 后端：
@@ -409,7 +411,7 @@ udp: true
 
 原始 3x-ui 订阅：
 
-- 只监听 `127.0.0.1`，公网不可达
+- 默认监听所有地址；收口后（可选）只监听 `127.0.0.1`，公网不可达
 - HTTP 200，`Content-Type: text/plain`
 - 包含 `Subscription-UserInfo`（Clash Verge 的流量条靠它渲染）
 - 正文为 Base64/通用节点订阅

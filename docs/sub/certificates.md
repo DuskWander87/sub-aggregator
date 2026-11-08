@@ -24,7 +24,7 @@ HTTPS 除了加密，还要向客户端证明「你连的确实是这个域名�
 `/root/cert/<域名>/fullchain.pem` 和 `privkey.pem`。配置后重跑 `deploy.sh`，原因见 §2.2。
 
 为什么不能用自签名证书：浏览器和客户端默认不信任它。而且不只是外部客户端——服务器内部的
-subconverter 和 `sub-manager` 通过回环地址访问 `https://<域名>:2096` 时同样校验证书链，
+subconverter 和 `sub-manager` 按订阅域名访问 `https://<域名>:2096` 时同样校验证书链，
 自签名证书和私有 CA 都会让这条内部链路失败。
 
 ## 2. acme.sh 是什么
@@ -132,7 +132,7 @@ certbot reconfigure --cert-name <名称> --webroot -w /var/www/acme
 Let's Encrypt 证书有效期 90 天。即使 DNS 交给 Cloudflare，也不能省掉续期：只做 DNS 托管时，
 域名直接解析到服务器公网 IP，TLS 在服务器上终结，Cloudflare 既不参与握手，也不会替源站
 续期；把记录改成橙云代理后，客户端看到的虽然是 Cloudflare 的边缘证书，但 Cloudflare 回源时
-仍要求源站有一张有效证书（Full / Full Strict），而且服务器内部回环访问 2096 的链路只认公网
+仍要求源站有一张有效证书（Full / Full Strict），而且服务器内部访问 2096 的链路只认公网
 CA。Cloudflare 的 Origin CA 证书虽然能签 15 年，但默认不被系统信任库接受，要额外把它的根
 证书装进系统，复杂度比定时续期更高。
 

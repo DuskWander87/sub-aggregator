@@ -23,7 +23,7 @@
 | 服务 | 监听地址 | 用途 |
 |---|---|---|
 | Xray | `*:443` | VLESS Reality 入站 |
-| 3x-ui 订阅 | `127.0.0.1:2096` | 原生客户端订阅，仅本机回源 |
+| 3x-ui 订阅 | `*:2096` | 原生客户端订阅（3x-ui 默认监听所有地址） |
 | 3x-ui 面板 | `*:<面板端口>` | 管理面板，端口由面板设置（`webPort`）决定 |
 
 由于 443 已由 Xray 占用，新的 HTTPS 订阅入口选择 `8443`，避免改动现有 Reality 入站或做复杂
@@ -46,9 +46,10 @@
 Shadowrocket / V2rayN 本来就该拿到的内容，而不是一份格式不对的配置；再加 `?t=clash` /
 `?t=raw` 作为强制覆盖。若识别失败会返回错误格式，这个方案就不该做。
 
-§2 的「两条独立链路」合并在同一个 URL 之下，只是分流后的两个分支。`2096` 原生订阅只监听
-`127.0.0.1`，公网只能经 `8443` 进入；本机 `/etc/hosts` 把订阅域名解析到回环地址，供
-subconverter 拉取原始订阅。见 [unified-subscription.md](unified-subscription.md) §6。
+§2 的「两条独立链路」合并在同一个 URL 之下，只是分流后的两个分支。`2096` 原生订阅默认
+仍在公网可达；可以选择把它收口到 `127.0.0.1`，让公网只能经 `8443` 进入，收口后要在
+`/etc/hosts` 把订阅域名解析到回环地址，供 subconverter 拉取原始订阅。见
+[unified-subscription.md](unified-subscription.md) §6。
 
 ## 3. 技术选型
 
@@ -265,7 +266,8 @@ openssl rand -hex 24
 
 1. 原始 3x-ui 订阅 URL 只保存在服务器 Nginx 配置中。
 2. Clash 只得到随机私有路径。
-3. 转换后端只监听 `127.0.0.1`，3x-ui 订阅服务也只监听 `127.0.0.1`。
+3. 转换后端只监听 `127.0.0.1`。3x-ui 订阅服务默认监听所有地址，可选收口到 `127.0.0.1`，见
+   [unified-subscription.md](unified-subscription.md) §6。
 4. 不使用第三方转换后端、短链或配置托管服务。规则集只由 Clash 客户端拉取：自维护规则由本站
    `8443` 提供，客户端不直连 GitHub（默认由服务器反代 GitHub，`--with-rules` 时读本机发布
    目录，见 §9.1）；ACL4SSR 规则集由 Clash 客户端经 jsdelivr 公共 CDN 获取。
@@ -282,7 +284,8 @@ openssl rand -hex 24
 - `/etc/nginx/conf.d/private-sub.conf` 不得提交到公共 Git 仓库。
 - 更换 3x-ui `subId` 后，必须执行 `sub-manager update <订阅编号>` 同步更新。
 - 订阅 URL 泄露时，用 `sub-manager rotate <订阅编号>` 轮换随机路径，见
-  [operations.md](operations.md) §1.5。
+  [operations.md](operations.md) §1.5。2096 未收口时还要重置对应客户端的 `subId`：原生分支
+  透传的 `Profile-Web-Page-Url` 带着它，见 [unified-subscription.md](unified-subscription.md) §6。
 
 ## 6. 单一策略组设计
 
