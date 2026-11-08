@@ -55,9 +55,9 @@ sub-manager test              # 检查全部订阅是否正常
 https://<域名>:8443/<48 位随机 hex>#<订阅名>
 ```
 
-整条复制到客户端里添加订阅，Clash 和 Shadowrocket 用的是同一条。末尾的 `#<订阅名>` 只给 Shadowrocket 显示名字用，不会发到服务器。
+整条复制到客户端里添加订阅，Clash 和 Shadowrocket 用的是同一条。末尾的 `#<订阅名>` 是给客户端看的显示名（Shadowrocket 只认它），不会发到服务器。
 
-冷门 Clash 客户端的 `User-Agent` 可能识别不出来，会拿到原生订阅。这时在 `#` 前加 `?t=clash` 强制返回 Clash 配置，比如 `https://<域名>:8443/<随机路径>?t=clash#<订阅名>`。反过来，`?t=raw` 强制返回原生订阅。
+服务器按 `User-Agent` 判断要不要返回 Clash 配置：UA 含 `clash`、`mihomo`、`verge` 等关键词的才返回，其余一律返回原生订阅。如果你的 Clash 客户端 UA 不含这些关键词，拿到的就是原生订阅，这时在 `#` 前加 `?t=clash` 强制返回 Clash 配置，比如 `https://<域名>:8443/<随机路径>?t=clash#<订阅名>`；反过来，`?t=raw` 强制返回原生订阅。`t` 写错的值不会退回 UA 判断，一律返回原生订阅。完整规则见 [docs/sub/unified-subscription.md](docs/sub/unified-subscription.md) §2。
 
 ## 日常操作
 
