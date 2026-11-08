@@ -57,19 +57,19 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 
 ```text
 /usr/local/sbin/sub-manager             # 订阅管理脚本（0700，仅 root）
-/usr/local/sbin/sub-rules-sync          # 规则同步：git → 发布目录（0700，仅 root）
-/usr/local/sbin/sub-rules-check         # 规则集一致性诊断（0750，只读）
+/usr/local/sbin/sub-rules-sync          # 规则同步：git → 发布目录（0700，仅 root；--with-rules 才用）
+/usr/local/sbin/sub-rules-check         # 规则集一致性诊断（0750，只读；按部署方式检查）
 /etc/sub-manager/clients.json           # 订阅状态（0600，目录 0700）
 /etc/nginx/conf.d/private-sub.conf      # 【脚本生成，勿手改】
-/etc/nginx/conf.d/sub-rules-cache.conf  # proxy_cache_path 缓存区（仅兜底路径用）
+/etc/nginx/conf.d/sub-rules-cache.conf  # proxy_cache_path 缓存区（GitHub 反代用）
 /etc/nginx/conf.d/acme-challenge.conf   # 80 端口 ACME 挑战（server_name = 订阅域名）
-/etc/nginx/snippets/sub-rules.conf      # 规则端点：本地文件优先 + GitHub 反代兜底
+/etc/nginx/snippets/sub-rules.conf      # 规则端点：有发布目录读本地文件，否则反代 GitHub
 /etc/nginx/snippets/sub-rules-common.conf
 /etc/nginx/snippets/sub-rules-upstream.conf
-/etc/systemd/system/sub-rules-sync.{service,timer}
+/etc/systemd/system/sub-rules-sync.{service,timer}  # 默认部署只装不启用
 /etc/systemd/system/subconverter.service
-/root/code/shadowrocket-config/         # 规则仓库 git 工作副本（0755，root）
-/var/lib/sub-rules/                     # 发布目录，nginx 直接 serve（0755，文件 0644）
+/root/code/shadowrocket-config/         # 规则仓库 git 工作副本（0755，root；仅 --with-rules）
+/var/lib/sub-rules/                     # 发布目录，nginx 直接 serve（0755，文件 0644；仅 --with-rules）
 /opt/subconverter-classic/              # 转换后端（pref.ini / base/ / snippets/）
 /root/cert/sub.example.com/             # Let's Encrypt 证书（acme.sh webroot 续期）
 /root/.acme.sh/                         # acme.sh 本体、账户与续期配置（root crontab 每日调用）
@@ -100,7 +100,7 @@ README §3.1。
 不写真实域名、订阅路径与客户端名。改真机对应文件时同步 `server/` 的同名文件，并把真实值换回
 占位符：真实域名 → `sub.example.com`、规则前缀 24 位 hex → `<RULES_PREFIX>`、证书路径 →
 `/root/cert/sub.example.com/`。
-`PROFILE_NAME=DuskWander` 与 Nginx 兜底的 `DuskWander87/shadowrocket-config` 是作者实际值，
+`PROFILE_NAME=DuskWander` 与 Nginx 规则反代的 `DuskWander87/shadowrocket-config` 是作者实际值，
 原样保留（与公开 docs 对齐）。`pref.ini` 活跃引用的自维护 snippet（`groups.txt`、`rulesets.txt`、
 `emoji.txt`、`rename_node.txt`）必须一起镜像，否则公开副本不自洽。
 
@@ -128,9 +128,11 @@ sub-manager remove sub-1        # 撤销；编号只增不复用，删除留下�
 sub-manager renumber 101        # 重排编号，订阅地址与设备配置不变
 sub-manager resync              # 改了模板/转换参数后重建配置
 sub-manager test                # 端到端验证全部订阅（四发 UA 断言）
-sub-rules-check                     # 端点 = 发布目录 = git 副本 = origin，并查同步器
-sub-rules-sync                      # 手工同步一次（push 后想跳过 1 分钟等待时用）
+sub-rules-check                     # 规则端点诊断，按部署方式选检查项；--with-rules 时还查同步器
+sub-rules-sync                      # --with-rules 时手工同步一次（push 后想跳过 1 分钟等待时用）
 ```
+
+本机是默认部署，没有启用 `--with-rules`，规则端点反代 GitHub。
 
 `list` 会只读查 `/etc/x-ui/x-ui.db`，显示每条订阅属于哪个面板客户端，并报告双向漂移
 （x-ui 有客户端却无地址 / 地址已无对应客户端）。**面板增删客户端不会自动改动聚合地址**，
@@ -207,11 +209,13 @@ nginx -t
 - **`nginx -t` 会 chown 缓存目录**：隔离校验配置里不能 include 生产的
   `sub-rules-cache.conf`，否则 `/var/cache/nginx/sub-rules` 属主被夺，规则端点返回 500。
   incidents `2026-08-10 nginx -t 夺走缓存目录属主`
-- **规则集不走 jsdelivr**：自维护 list 由 `sub-rules-sync.timer` 每分钟从规则仓库发布到
-  `/var/lib/sub-rules/`，nginx 直接 serve；jsdelivr 的两层缓存不同步，重复 purge 会让内容
-  在新旧间跳变。incidents `2026-08-10 jsdelivr 缓存不收敛`
-- **兜底反代缓存的两条硬约束**：必须写 `proxy_ignore_headers Cache-Control Expires`；禁止
-  `proxy_cache_background_update on` 和 `use_stale ... updating`。incidents `2026-08-19`
+- **自维护规则集不走 jsdelivr**：两个 list 由本站 8443 提供。默认部署反代 GitHub，push 后最长
+  约 5.5 分钟生效；`--with-rules` 时由 `sub-rules-sync.timer` 每分钟发布到 `/var/lib/sub-rules/`，
+  nginx 直接 serve。jsdelivr 的两层缓存不同步，重复 purge 会让内容在新旧间跳变。incidents
+  `2026-08-10 jsdelivr 缓存不收敛`，两种模式的对比见 design §9.1
+- **GitHub 反代缓存的两条硬约束**：默认部署下每个规则请求都经过它。必须写
+  `proxy_ignore_headers Cache-Control Expires`；禁止 `proxy_cache_background_update on` 和
+  `use_stale ... updating`。incidents `2026-08-19`
 - **`interval: 1800` 只管自动刷新**：手动「更新规则集」本来就绕过它，排查规则不生效时不要
   把它当主因。incidents `2026-08-19` 被排除的方向
 - **`rule-providers` 必须带 `format: text`**：由 Nginx `sub_filter` 注入，缺了国内规则集

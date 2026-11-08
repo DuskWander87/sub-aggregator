@@ -1,139 +1,115 @@
 # sub-aggregator
 
-> 给 3x-ui 加一层订阅聚合。一条地址同时服务 Clash/Mihomo 与 Shadowrocket/v2rayN，自维护的规则集本机托管、本机发布。
+> 给 3x-ui 加一层订阅聚合。同一条订阅地址，Clash/Mihomo 拿到带规则集的完整配置，Shadowrocket/v2rayN 只拿节点，转换在你自己的服务器上完成。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)](LICENSE)
 [![3x-ui](https://img.shields.io/badge/base-3x--ui-2F6FEB?style=flat-square)](https://github.com/MHSanaei/3x-ui)
 [![Clash / Mihomo](https://img.shields.io/badge/client-Clash%20%2F%20Mihomo-7B61FF?style=flat-square)](https://github.com/MetaCubeX/mihomo)
 [![Docs](https://img.shields.io/badge/docs-zh-555?style=flat-square)](docs/sub/README.md)
 
-## 它解决什么
+3x-ui 的原生订阅是一串 Base64 编码的节点，Shadowrocket、v2rayN 能直接用，Clash 客户端不认。第三方转换服务能把格式对上，代价是原始订阅地址要交给别人。转换和规则集都落在别人的服务器上，服务停不停、规则什么时候更新，你控制不了。同一个人的手机和电脑还常常各配一条订阅，换个客户端就要重新找地址。
 
-3x-ui 的原生订阅是一串 Base64 编码的节点，Clash 客户端不认。第三方转换服务能把格式对上，但转换和规则集都落在别人的服务器上，服务停不停、规则什么时候更新，你控制不了。同一个人的手机和电脑还常常各配一条订阅，换个客户端就要重新找地址。
+sub-aggregator 装在 3x-ui 所在的服务器上，把转换收回本机。一个人的所有设备共用一条 HTTPS 订阅地址，Nginx 按 `User-Agent` 识别客户端，返回不同的内容：
 
-这个项目把这两件事收回本机。设备只记一条 HTTPS 地址，Nginx 按 `User-Agent` 决定返回 Clash YAML 还是原生订阅原文。自维护的规则集由 systemd 定时器从 Git 发布到 Nginx 直接 serve 的目录，push 后最多一分钟生效，中间没有 CDN 缓存。
+| 客户端 | 拿到什么 |
+|---|---|
+| Clash/Mihomo 系，如 Clash Verge、ClashMi、ClashMetaForAndroid | 本机转换的完整配置：节点、一个手动选择的策略组、防 DNS 泄漏配置和规则集 |
+| Shadowrocket、v2rayN 和其他客户端 | 3x-ui 原生订阅原样转发，只有节点，没有规则集、策略组和 DNS 设置 |
 
-## 架构
-
-一条订阅地址，两条互不依赖的链路：
-
-```mermaid
-flowchart LR
-  D([设备]) -->|一条 HTTPS 地址| N["Nginx :8443（默认）"]
-  N -->|Clash / Mihomo UA| C[Subconverter]
-  C --> Y[完整 Mihomo YAML]
-  N -->|其余 UA，原样透传| R[3x-ui 原生订阅]
-  G[Git 规则仓库] -->|git push| T[sub-rules-sync.timer]
-  T --> P["/var/lib/sub-rules"]
-  P --> N
-```
-
-订阅链路由 Nginx 和本机 subconverter 组成，规则链路是一条独立的 Git 发布管道。只装订阅入口也能用，规则集可以以后再加。图中画的是自维护的两个 list；ACL4SSR 的 9 个上游规则集按天更新，仍走 jsdelivr，不在这条链路里。
-
-## 特性
-
-- **一条地址两用**：同一个 URL 按 `User-Agent` 分流，Clash 家族拿完整 Mihomo YAML，其余客户端拿原生订阅原文。`?t=clash` / `?t=raw` 可以强制指定，认不出 UA 时落到原生分支。
-- **订阅路径即凭据**：每条订阅一条含 48 位随机 hex 的 HTTPS 地址。`sub-manager rotate` 换路径即作废旧地址，订阅编号和源订阅都不变。
-- **与 3x-ui 只读联动**：`add --from-xui` 从面板客户端列表里挑人，原始订阅地址由 `subId` 推导。脚本对 x-ui、xray 和任何 `*.db` 零写操作。
-- **节点名保持恒定**：转换参数剥掉 3x-ui 追加的 `|📊<剩余流量>`，更新订阅后 Mihomo 仍能还原你手动选择的节点。
-- **规则集自托管**：自维护的 [ChinaDirect.list 和 Reject.list](https://github.com/DuskWander87/shadowrocket-config) 从 Git 发布到本机目录，Nginx 直接 serve，不经过 jsdelivr 或 GitHub 缓存。发布目录缺文件时才由服务器侧回源 GitHub 兜底，客户端始终只连本站。
-- **低配友好**：无 Docker、无外部配置托管，2 GB 内存够用，端口避开 Xray Reality 占用的 443。
-- **每一步都能自证**：`sub-manager test` 对每条订阅发四种 UA 做端到端断言，`sub-rules-check` 核对端点、发布目录、git 副本和 origin 四处一致。
+转换时会去掉 3x-ui 追加在节点名末尾的剩余流量（`|📊…`），名字不随流量变化，Clash 更新订阅后还记得你选的是哪个节点。原生订阅不做任何改动，所以 Shadowrocket 里的节点名仍带着剩余流量。
 
 ## 快速开始
 
-前提：一台跑着 3x-ui 的 Ubuntu 服务器，443 上有一个可用的 VLESS Reality 入站；一个指向它的域名（缺证书时脚本自动签发）；root 权限和至少 2 GB 内存；一个空闲的订阅入口端口（默认 `8443`，见下文）。
+### 1. 准备
 
-在仓库根目录执行一条命令：
+- 一台 Ubuntu 24.04 服务器，装好了 3x-ui，443 上有一个能用的 VLESS Reality 入站。需要 root 权限和至少 2 GB 内存，不需要 Docker。
+- 一个解析到这台服务器的域名。没有证书时脚本会用 Let's Encrypt 签发，要求公网能访问 80 端口。
+- 一个空闲端口留给订阅入口，默认 `8443`（443 已被 Reality 占用），并在防火墙 / 云安全组放行 TCP 入站。
+
+### 2. 部署
 
 ```bash
 git clone https://github.com/DuskWander87/sub-aggregator.git
 cd sub-aggregator
-tools/deploy.sh
+tools/deploy.sh               # 加 --dry-run 只看计划，不改任何文件
 ```
 
-脚本自动推导域名和证书（缺证书时用 Let's Encrypt 签发，续期由 acme.sh 自动完成，见
-[certificates.md](docs/sub/certificates.md)），缺失依赖会先确认安装；打印摘要后确认一次即
-完成部署，覆盖前先备份。想先预览加 `--dry-run`（只读，不改任何文件）。参数、手动步骤、
-规则链和回滚见 [deploy.md](docs/sub/deploy.md)。
+脚本会自己推导域名、找证书，没有证书就签发一张，之后由 acme.sh 自动续期。缺依赖时先问你要不要装，打印部署摘要后再确认一次才动手，覆盖文件前都会先备份。
 
-**订阅入口端口**：443 已被 Reality 占用，订阅入口默认监听 `8443`，它会出现在每条订阅地址里
-（`https://<域名>:8443/...`）。部署前确认两件事：
+`8443` 被占用时加 `--port <端口>` 换一个。端口会写进每条订阅地址，装好后再改，所有设备都要重新导入。
 
-- 端口空闲。被其他程序占用时脚本会在改动配置前报错退出，这时加 `--port` 换一个空闲端口：
+装好后建议再手工做一步：把 3x-ui 的订阅服务（默认 2096 端口）改成只监听本机，原始订阅地址在公网上就访问不到了。部署脚本不碰 3x-ui，步骤见 [deploy.md](docs/sub/deploy.md) §3.5。全部参数、手动部署和回滚也在这份文档里。
 
-  ```bash
-  ss -lntp | grep ':8443 '         # 有输出说明已被占用
-  tools/deploy.sh --port 9443      # 换用其他端口
-  ```
+### 3. 建订阅，导入客户端
 
-  `80`、`443`、`2096`、`25500` 是本系统其他组件的固定端口，不能用作订阅入口。
-- 防火墙 / 云安全组放行这个端口的 TCP 入站，否则设备拉不到订阅。
+部署不会替你建订阅。先在 3x-ui 面板的入站里添加客户端，一个客户端对应一条订阅，再回到服务器：
 
-重装时脚本沿用上次的端口。之后再改端口等于换订阅地址，所有设备都要重新配置。
+```bash
+sub-manager add --from-xui    # 从面板里还没有订阅的客户端中选一个
+sub-manager test              # 检查全部订阅是否正常
+```
 
-不想再用了就跑 `tools/uninstall.sh`。它会先打印计划再等确认，只删聚合层，3x-ui、节点、
-证书和 Nginx 本身不动。
+`add` 最后会打印订阅地址：
 
-规则链是可选步骤。加 `--with-rules` 启用，默认使用作者的 [规则集](https://github.com/DuskWander87/shadowrocket-config)；想自己维护就 fork 后传 `--rules-repo`。
+```text
+https://<域名>:8443/<48 位随机 hex>#<订阅名>
+```
+
+整条复制到客户端里添加订阅，Clash 和 Shadowrocket 用的是同一条。末尾的 `#<订阅名>` 只给 Shadowrocket 显示名字用，不会发到服务器。
+
+冷门 Clash 客户端的 `User-Agent` 可能识别不出来，会拿到原生订阅。这时在 `#` 前加 `?t=clash` 强制返回 Clash 配置，比如 `https://<域名>:8443/<随机路径>?t=clash#<订阅名>`。反过来，`?t=raw` 强制返回原生订阅。
 
 ## 日常操作
 
 ```bash
-sub-manager list              # 订阅、客户端归属、双向漂移
-sub-manager update sub-1      # 源订阅 subId 变了，地址不变
-sub-manager rotate sub-1      # 换路径，编号和源订阅不变
-sub-manager remove sub-1      # 撤销
-sub-rules-check               # 规则链四处一致性
+sub-manager list              # 列出订阅地址，以及和面板客户端的对应关系
+sub-manager add --from-xui    # 面板里加了客户端，给它建订阅
+sub-manager update sub-1      # 面板里重置了 subId，订阅地址不变
+sub-manager rotate sub-1      # 地址泄露，换一条新地址，设备要重新导入
+sub-manager remove sub-1      # 删除订阅
+sub-manager test              # 检查全部订阅
 ```
 
-面板增删客户端不会自动改动聚合地址。加人之后要再跑一次 `sub-manager add --from-xui`，`list` 会报告两边的漂移。
+面板里增删客户端不会自动同步过来。加了人要再跑一次 `add --from-xui`；删了人，`list` 会标出哪些订阅已经没有对应的客户端。每条命令的细节见 [operations.md](docs/sub/operations.md)。
 
-改了 `base/all_base.tpl` 或 `snippets/*.txt` 之后，先重启再 resync，因为 `cache_config=300` 会缓存模板：
+## 规则集只对 Clash 生效
+
+Shadowrocket、v2rayN 从订阅拿到的只有节点，分流由它们自己的配置决定。Clash 配置则引用 11 个规则集：9 个来自 [ACL4SSR](https://github.com/ACL4SSR/ACL4SSR)，客户端经 jsDelivr 拉取；另外 2 个是作者自维护的 [`ChinaDirect.list` 和 `Reject.list`](https://github.com/DuskWander87/shadowrocket-config/tree/main/rules)，由你的服务器在订阅端口上提供，客户端不用直连国内不可达的 raw.githubusercontent.com。
+
+默认部署时，这两个列表由服务器反代 GitHub 提供，受 GitHub 边缘缓存影响，push 后最长约 5.5 分钟才拉得到新版本。部署时（或之后重跑一次）加 `--with-rules`，服务器会克隆规则仓库、每分钟同步一次，push 后一分钟内就能拉到，GitHub 暂时访问不了也不影响：
 
 ```bash
-systemctl restart subconverter && sub-manager resync
+tools/deploy.sh --with-rules
 ```
 
-## 它不是什么
+想维护自己的规则，fork 规则仓库，改 `rules/` 下的两个列表，部署时用 `--rules-repo <你的账号>/shadowrocket-config` 指向你的仓库，加不加 `--with-rules` 都生效。规则端点是否正常，用 `sub-rules-check` 检查，两种方式都适用。
 
-- 不是带界面的管理面板。部署脚本一条命令完成，默认打印摘要后确认一次；日常操作走 `sub-manager` 命令行。
-- 不修改 3x-ui、Xray 或 443 上的 VLESS Reality 入站。它只在旁边新增 Nginx 入口和一个只监听回环地址的 subconverter。
-- 不是多租户服务。每条订阅对应一个 3x-ui 客户端，没有账号体系，也没有配额。
-- 不提供高可用。单机、单 Nginx、单 subconverter，适合个人或小圈子。
+## 安全与边界
 
-## 仓库结构
+- 不修改 3x-ui、Xray 和 443 上的 Reality 入站，面板数据库只读。它只在旁边加一个 Nginx 订阅入口和一个只监听本机的 subconverter。
+- **订阅地址就是凭据。** 拿到地址的人就能拉到节点，泄露后用 `sub-manager rotate` 换一条，旧地址立即失效。
+- **换地址不等于踢人。** 已经拉到的配置里，节点的 UUID 照样能用。要真正收回访问，去 3x-ui 删掉这个客户端或更换它的 UUID。
+- 只有命令行，没有网页面板、账号体系和配额，也不做高可用，适合个人或小圈子用。
+- 仓库里的域名、路径都是占位符，不含真实凭据。它记录的是一台真实机器的做法，请当参考蓝图，不要当安全承诺。
 
-```text
-server/            真机配置的脱敏拷贝，靠人手工同步
-  sbin/            sub-manager、sub-rules-sync、sub-rules-check
-  nginx/           订阅入口片段、规则端点、缓存区
-  subconverter/    pref.ini、Mihomo 模板、自维护 snippets
-  systemd/         转换后端与规则同步单元
-tools/             部署 deploy.sh、卸载 uninstall.sh、沙箱自测 selftest.sh
-docs/              中文运维文档
-  sub/             订阅聚合服务：部署、订阅入口、设计、操作、故障记录
-  3x-ui/           3x-ui / Reality 底座：故障排查归档
-```
+## 卸载
+
+不想再用了就跑 `tools/uninstall.sh`。它会先打印计划再等确认，只删聚合层，3x-ui、节点、证书和 Nginx 本身不动。
 
 ## 文档
 
 | 文档 | 什么时候读 |
 |---|---|
-| [docs/sub/README.md](docs/sub/README.md) | 找入口、查常量（端口、路径、`CONVERT_OPTS` 的单一事实源） |
-| [deploy.md](docs/sub/deploy.md) | 第一次安装、重装或卸载：前提、脚本、手动步骤、回滚 |
-| [certificates.md](docs/sub/certificates.md) | 证书给谁用、续期链路、能不能不用 acme.sh |
+| [deploy.md](docs/sub/deploy.md) | 第一次安装、重装、卸载或回滚 |
+| [unified-subscription.md](docs/sub/unified-subscription.md) | 给设备配订阅，或想知道按客户端分流的规则 |
+| [operations.md](docs/sub/operations.md) | 管理订阅、检查与验证、备份 |
+| [certificates.md](docs/sub/certificates.md) | 证书给谁用、怎么续期、能不能不用 acme.sh |
 | [design.md](docs/sub/design.md) | 要改系统，先看设计取舍 |
-| [unified-subscription.md](docs/sub/unified-subscription.md) | 给设备配订阅，或要改 UA 分流规则 |
-| [operations.md](docs/sub/operations.md) | 管理脚本、轮换撤销、检查与验证、备份 |
 | [incidents.md](docs/sub/incidents.md) | 「这个症状以前见过吗」 |
-| [3x-ui/troubleshooting.md](docs/3x-ui/troubleshooting.md) | 节点不通时，一次完整排查全过程 |
+| [3x-ui/troubleshooting.md](docs/3x-ui/troubleshooting.md) | 节点不通时，一次完整的排查过程 |
+| [docs/sub/README.md](docs/sub/README.md) | 查端口、路径和转换参数 |
 
-## 安全与边界
-
-- **订阅地址就是凭据**。随机路径泄露后，持有者可以更新这份订阅。`rotate` 会换发新路径。
-- **换路径不等于踢人**。轮换或删除只作废配置分发通道。客户端已经拉到的配置不会消失，里面的 VLESS UUID 仍然有效。要真正收回访问，去 3x-ui 面板删掉或更换该客户端的 UUID。
-- **仓库不含真实凭据**。域名、随机路径、证书路径一律是占位符。但它描述了一台真实机器的架构细节，请把它当参考蓝图，不要当安全承诺。
+`server/` 是服务器上实际配置的脱敏副本，`tools/` 是部署、卸载和自测脚本。
 
 ## 许可与致谢
 

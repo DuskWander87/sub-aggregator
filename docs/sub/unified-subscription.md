@@ -58,7 +58,10 @@ UA 白名单（脚本常量 `UA_CLASH_PATTERN`，大小写不敏感）：
 | 分支 | 内容 | 与源头的关系 |
 |---|---|---|
 | Clash | 完整 Mihomo YAML，含 `rule-providers`、fake-ip DNS、单策略组 | 与本机 subconverter 直出一致，外加 Nginx `sub_filter` 注入的 `format: text` |
-| 原生 | 3x-ui 的 Base64 节点列表原文 | 正文与回环直连 `2096` 原始订阅**逐字节相同**（两处每次请求都变的值除外，见下） |
+| 原生 | 3x-ui 的 Base64 节点列表原文，只有节点 | 正文与回环直连 `2096` 原始订阅**逐字节相同**（两处每次请求都变的值除外，见下） |
+
+规则集、DNS 和策略组只在 Clash 分支里。Shadowrocket、V2rayN 从本订阅只拿到节点，分流由客户端
+自己的配置决定。
 
 原生分支保留上游全部响应头，包括 `Profile-Update-Interval`、`Profile-Web-Page-Url`、
 `Subscription-Userinfo`；唯一被覆盖的是 `Profile-Title`，由 Nginx 用 `sub-manager` 的

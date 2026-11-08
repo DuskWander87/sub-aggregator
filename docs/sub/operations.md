@@ -250,18 +250,27 @@ sub-manager renumber 101
 
 ## 2. 更新自维护规则
 
-**不需要在服务器执行任何命令。**
+**不需要在服务器执行任何命令。** push 之后多久拉得到，取决于部署时是否加了 `--with-rules`
+（本机没有加，见 [README.md](README.md) §2）：
 
 ```text
-git push → sub-rules-sync.timer（每分钟）→ /var/lib/sub-rules/ → 客户端点「更新规则集」
+默认部署
+  git push → GitHub（边缘缓存 300 秒）→ Nginx 反代（缓存 30 秒）→ Clash 客户端点「更新规则集」
+
+--with-rules
+  git push → sub-rules-sync.timer（每分钟）→ /var/lib/sub-rules/ → Clash 客户端点「更新规则集」
 ```
 
-延迟上限 = 定时器周期 = **1 分钟**。想跳过这 1 分钟，可在服务器手工跑一次
-`sub-rules-sync`（幂等，随时可执行）。
+默认部署的延迟上限约 5.5 分钟，期间单次拉取可能拿到旧版。服务器侧没有办法加速：GitHub 边缘
+缓存绕不过去，见 [incidents.md](incidents.md) `2026-08-19 「更新规则集」拿到的永远是上一版`。
+需要更快就启用 `--with-rules`。
 
-客户端侧：`interval: 1800` 是**自动**刷新周期；手动点「更新规则集」（或
-`PUT /providers/rules/ChinaDirect`）会绕过 interval 立即拉取，且端点无缓存层，
-**单次拉取一定拿到发布目录的当前内容**。
+启用 `--with-rules` 后，延迟上限 = 定时器周期 = **1 分钟**。想跳过这 1 分钟，可在服务器手工跑
+一次 `sub-rules-sync`（幂等，随时可执行）。
+
+Clash 客户端侧：`interval: 1800` 是**自动**刷新周期；手动点「更新规则集」（或
+`PUT /providers/rules/ChinaDirect`）会绕过 interval 立即拉取。启用 `--with-rules` 时端点无缓存
+层，**单次拉取一定拿到发布目录的当前内容**。
 
 订阅内容完全不变（URL 恒定），因此**不需要**重启 subconverter，**不需要**重新添加订阅，
 客户端 `providers/` 目录里文件名也恒定，不会累积孤儿文件。
@@ -269,9 +278,14 @@ git push → sub-rules-sync.timer（每分钟）→ /var/lib/sub-rules/ → 客�
 诊断：
 
 ```bash
-sub-rules-check      # 比对 端点 = 发布目录 = git 工作副本 = origin/main，并报同步器健康度
-sub-rules-sync -v    # 手工同步一次，打印结果
+sub-rules-check      # 先判断部署方式，再核对对应的整条链
+sub-rules-sync -v    # 仅 --with-rules：手工同步一次，打印结果
 ```
+
+`sub-rules-check` 按部署方式选检查项：发布目录存在或定时器已启用，按 `--with-rules` 检查，
+否则按默认部署检查。默认部署核对两个端点返回 `200`、`X-Rule-Source: github`、含规则行，且
+内容与 GitHub 当前版本一致，push 后约 5.5 分钟内报不一致属正常。`--with-rules` 核对端点 =
+发布目录 = git 工作副本 = origin/main，并报同步器健康度。
 
 同步脚本用 `fetch` + `merge --ff-only`：`/root/code/shadowrocket-config` 是可能被直接编辑的
 工作副本，有本地提交或未提交改动时**拒绝合并**而不是 `reset --hard` 销毁。此时
@@ -405,7 +419,8 @@ udp: true
 - 未知路径返回 404
 - **原始 3x-ui 订阅路径未出现在返回内容中**
 
-规则端点：`sub-rules-check` 全绿，主路径 `X-Rule-Source: local`。
+规则端点：`sub-rules-check` 全绿。默认部署两个文件都是 `X-Rule-Source: github`，启用
+`--with-rules` 时是 `X-Rule-Source: local`。
 
 ### 3.3 资源基线
 

@@ -266,9 +266,9 @@ openssl rand -hex 24
 1. 原始 3x-ui 订阅 URL 只保存在服务器 Nginx 配置中。
 2. Clash 只得到随机私有路径。
 3. 转换后端只监听 `127.0.0.1`，3x-ui 订阅服务也只监听 `127.0.0.1`。
-4. 不使用第三方转换后端、短链或配置托管服务。自维护规则由本机发布目录
-   `/var/lib/sub-rules/` 直接 serve，客户端不接触第三方（GitHub 反代仅在发布目录缺文件时
-   作为兜底触发）；ACL4SSR 规则集仍通过 jsdelivr 公共 CDN 分发给客户端。
+4. 不使用第三方转换后端、短链或配置托管服务。规则集只由 Clash 客户端拉取：自维护规则由本站
+   `8443` 提供，客户端不直连 GitHub（默认由服务器反代 GitHub，`--with-rules` 时读本机发布
+   目录，见 §9.1）；ACL4SSR 规则集由 Clash 客户端经 jsdelivr 公共 CDN 获取。
 5. Nginx 对该虚拟主机关闭 access log。
 6. 非精确路径统一返回 404。
 7. 订阅响应禁止缓存。
@@ -430,6 +430,10 @@ tun:
 
 ## 8. RULE-SET 规则集模式
 
+规则集只出现在 Clash 分支的配置里，原生分支只有节点（见
+[unified-subscription.md](unified-subscription.md) §3）。本节与 §9 说的「客户端」都指 Clash
+客户端。
+
 通过 `expand=false` 参数 + `clash-classic:` 远程 URL 格式，输出为 Mihomo 原生 `RULE-SET` +
 `rule-providers`，配置在 200 行以内。若不加 `expand=false`，subconverter 会把远程规则集展开
 为逐条内联规则（DOMAIN-SUFFIX、IP-CIDR 等），配置会膨胀到 10000 行以上。
@@ -456,11 +460,13 @@ DIRECT,[]GEOIP,CN,no-resolve
 
 | 来源 | 用途 |
 |---|---|
-| `DuskWander87/shadowrocket-config/rules/Reject.list` | 自维护广告/追踪拦截（本机发布目录，见 §9） |
-| `DuskWander87/shadowrocket-config/rules/ChinaDirect.list` | ACL4SSR 未覆盖的国内域名补充（本机发布目录，见 §9） |
+| `DuskWander87/shadowrocket-config/rules/Reject.list` | 自维护广告/追踪拦截（本站 `8443` 提供，见 §9） |
+| `DuskWander87/shadowrocket-config/rules/ChinaDirect.list` | ACL4SSR 未覆盖的国内域名补充（本站 `8443` 提供，见 §9） |
 | `ACL4SSR/Clash/` 系列 | 局域网、解封、Apple、广告、中国域名/媒体/企业 IP/全量 IP（jsdelivr `@master`） |
 
-与 Shadowrocket 配置共享同一套规则文件（`.list` 格式兼容），更新一处即可同步两端。
+规则仓库里的 Shadowrocket 配置（`shadowrocket.conf`）也引用这两个自维护列表，`.list` 格式两边
+通用，改一处两端都会更新。那份配置要在 Shadowrocket 里单独导入，列表由 Shadowrocket 直接从
+GitHub 拉取，不经过本订阅。
 
 输出的 rules 段：
 
@@ -481,8 +487,9 @@ rules:
   - MATCH,🚀节点选择
 ```
 
-规则集中，`ChinaDirect` 和 `Reject` 两个自维护规则由本站 `8443` 从本机发布目录直接 serve
-（GitHub 反代兜底），其余 9 个 ACL4SSR 规则集由客户端经 jsdelivr CDN 获取（分工见 §9.1）。
+规则集中，`ChinaDirect` 和 `Reject` 两个自维护规则由本站 `8443` 提供（默认反代 GitHub，
+`--with-rules` 时读本机发布目录），其余 9 个 ACL4SSR 规则集由客户端经 jsdelivr CDN 获取（分工
+见 §9.1）。
 `interval` 为建议刷新周期，实际刷新时机取决于客户端实现，部分客户端需手动触发。
 
 ### 8.1 GEOIP 规则与 no-resolve
@@ -502,16 +509,43 @@ rules:
 
 | 规则集 | 来源 | 引用方式 | interval |
 |---|---|---|---|
-| 自维护 2 个（`ChinaDirect` / `Reject`） | 本机发布目录 `/var/lib/sub-rules/`（GitHub 反代兜底） | `https://sub.example.com:8443/r/<随机前缀>/*.list` | 1800 |
+| 自维护 2 个（`ChinaDirect` / `Reject`） | 本站 `8443`：默认反代 GitHub，`--with-rules` 时读本机发布目录 | `https://sub.example.com:8443/r/<随机前缀>/*.list` | 1800 |
 | ACL4SSR 9 个 | jsdelivr CDN | `cdn.jsdelivr.net/gh/ACL4SSR/ACL4SSR@master/...` | 86400 |
 
 客户端始终只连本站 `8443` 或 jsdelivr，**从不直连 `raw.githubusercontent.com`**（国内被墙）。
 
+自维护的两个列表怎么供给，取决于部署时是否加 `--with-rules`：
+
+| | 默认部署 | `--with-rules` |
+|---|---|---|
+| 端点读什么 | 反代 `raw.githubusercontent.com`，本机缓存 30 秒（`X-Rule-Source: github`） | 本机发布目录 `/var/lib/sub-rules/`，无缓存层（`X-Rule-Source: local`）；缺文件时才回落到反代 |
+| push 后多久拉得到 | 最长约 5.5 分钟：GitHub 边缘缓存 `max-age=300`，加本机 30 秒；期间单次拉取可能拿到旧版 | 最长 1 分钟（同步周期），单次拉取即当前内容 |
+| GitHub 不可达时 | 返回本机缓存的最后一份（`inactive=30d`），从没缓存过就拉取失败 | 不受影响，同步失败也照常 serve 发布目录 |
+| 服务器上多出 | 无 | 规则仓库工作副本、发布目录，启用中的 `sub-rules-sync.timer` |
+
+`--rules-repo` 两种模式都生效：默认部署改的是反代目标，`--with-rules` 改的是克隆来源。本机是默认
+部署，见 [README.md](README.md) §2。
+
 ACL4SSR 保持 jsdelivr：上游按天更新，不存在「改完想立刻生效」的诉求，无需自托管。
 
-为什么自维护的两个必须由本机发布、不能直接写 GitHub 或 jsdelivr，见 §9.4。
+为什么自维护的两个要由本站提供、不能直接写 GitHub 或 jsdelivr，以及什么时候值得开
+`--with-rules`，见 §9.4。
 
 ### 9.2 实现结构
+
+两种模式都会安装：
+
+```text
+/usr/local/sbin/sub-rules-sync              # 同步脚本（0700，仅 root）
+/usr/local/sbin/sub-rules-check             # 一致性诊断（0750，只读）
+/etc/systemd/system/sub-rules-sync.{service,timer}   # 默认部署只装不启用
+/etc/nginx/snippets/sub-rules.conf          # 两个 location + 两个 @sub_rules_* 反代命名 location
+/etc/nginx/snippets/sub-rules-common.conf   # 两条路径共用的响应头
+/etc/nginx/snippets/sub-rules-upstream.conf # GitHub 反代参数与缓存设置
+/etc/nginx/conf.d/sub-rules-cache.conf      # http 上下文，proxy_cache_path 缓存区
+```
+
+只在 `--with-rules` 时存在：
 
 ```text
 /root/code/shadowrocket-config/            # git 工作副本（0755，root）
@@ -519,16 +553,13 @@ ACL4SSR 保持 jsdelivr：上游按天更新，不存在「改完想立刻生效
   ├─ ChinaDirect.list
   ├─ Reject.list
   └─ .last-sync                            # 最后一次成功 fetch 的 unix 时间戳
-/usr/local/sbin/sub-rules-sync           # 同步脚本（0700，仅 root）
-/etc/systemd/system/sub-rules-sync.{service,timer}
-/etc/nginx/snippets/sub-rules.conf          # 两个 location + 两个 @兜底命名 location
-/etc/nginx/snippets/sub-rules-common.conf   # 两条路径共用的响应头
-/etc/nginx/snippets/sub-rules-upstream.conf # 仅兜底路径使用的反代参数
-/etc/nginx/conf.d/sub-rules-cache.conf      # http 上下文，proxy_cache_path 缓存区
 ```
 
-`/root` 是 0700，www-data 穿不进去，所以 clone 目录不能直接给 nginx serve，必须由同步脚本
-发布到 `/var/lib/sub-rules/`。
+两种模式用同一份 Nginx 配置：每个 location 先 `try_files` 发布目录里的同名文件，找不到才落到
+`@sub_rules_*` 反代 GitHub。默认部署没有发布目录，所以每次请求都走反代。
+
+以下只涉及 `--with-rules`。`/root` 是 0700，www-data 穿不进去，所以 clone 目录不能直接给 nginx
+serve，必须由同步脚本发布到 `/var/lib/sub-rules/`。
 
 同步脚本的三条保守设计：
 
@@ -539,14 +570,15 @@ ACL4SSR 保持 jsdelivr：上游按天更新，不存在「改完想立刻生效
 - 先全部校验（非空 + 至少一条规则行）再全部发布，且经由临时文件 `mv`，避免发布出半套规则或
   被 nginx 读到写了一半的文件。
 
-### 9.3 兜底路径的缓存：两条硬约束
+### 9.3 GitHub 反代的缓存：两条硬约束
 
-发布目录正常时**根本走不到缓存**：nginx 直接 serve 本地文件，`X-Rule-Source: local`。
-只有发布目录缺文件时才落到 `@sub_rules_*` 反代 GitHub，此时 `X-Rule-Source: github`。
-兜底的意义是保证端点任何情况下都不 404：rule-provider 加载失败会让 Mihomo 的国内流量全部走
-代理。`proxy_cache_use_stale` + `inactive=30d` 让 GitHub 不可达时仍有最后一份可用规则。
+默认部署没有发布目录，每次请求都走 `@sub_rules_*` 反代 GitHub（`X-Rule-Source: github`），这段
+缓存就是主路径。启用 `--with-rules` 后，发布目录正常时**根本走不到缓存**
+（`X-Rule-Source: local`），反代降为兜底，保证发布目录缺文件时端点也不 404：rule-provider
+加载失败会让 Mihomo 的国内流量全部走代理。两种模式下，`proxy_cache_use_stale` +
+`inactive=30d` 都让 GitHub 不可达时仍有最后一份可用规则。
 
-兜底路径上有两条**必须**遵守的约束（踩坑记录见 [incidents.md](incidents.md) `2026-08-19`）：
+反代路径上有两条**必须**遵守的约束（踩坑记录见 [incidents.md](incidents.md) `2026-08-19`）：
 
 - **必须写 `proxy_ignore_headers Cache-Control Expires`。** 上游回
   `Cache-Control: max-age=300`，nginx 默认尊重上游指令并**完全覆盖** `proxy_cache_valid`。
@@ -558,12 +590,12 @@ ACL4SSR 保持 jsdelivr：上游按天更新，不存在「改完想立刻生效
 缓存目录 `/var/cache/nginx/sub-rules` 必须属 `www-data`：`nginx -t` 会夺走它，见
 [incidents.md](incidents.md) `2026-08-10 nginx -t 夺走缓存目录属主`。
 
-### 9.4 为什么自维护规则由本机发布
+### 9.4 为什么自维护规则由本站提供
 
 Clash 分支的 profile 由本站 `8443` 生成并返回，不经过 GitHub 或 jsdelivr。但客户端
 「更新订阅」不只下载 profile：Mihomo 加载配置时会初始化全部 `rule-providers`，任一规则表
 拉取失败，这次配置加载就失败，客户端保留上一份配置。于是规则表的可达性也是订阅可靠性的
-一部分——规则表拉不到的表现是「订阅更新失败」，不是「分流不准」。
+一部分：规则表拉不到的表现是「订阅更新失败」，不是「分流不准」。
 
 这排除了两个候选来源：
 
@@ -576,21 +608,20 @@ Clash 分支的 profile 由本站 `8443` 生成并返回，不经过 GitHub 或 
   边缘缓存也会让「拉得越勤的文件越旧」（incidents `2026-08-19 「更新规则集」拿到的永远
   是上一版`）。
 
-本机发布同时满足三条：
+所以两个列表的地址固定写成本站 `8443`，两种模式都满足：
 
 1. 客户端只连本站 `8443`，国内可达，路径上没有境外地址；
-2. 主路径无缓存层，nginx 直接读发布目录，读到即当前内容；push 到生效的上限 = 同步周期
-   1 分钟；
-3. URL 恒定（随机前缀 + 固定文件名），更新规则内容不需要改订阅。
+2. URL 恒定（随机前缀 + 固定文件名），更新规则内容不需要改订阅。
 
-不直接把 git 工作副本交给 nginx，原因有两个，且都与正确性有关：`/root` 是 0700，
-www-data 穿不进去；`git fetch` 合并工作副本与 nginx 读文件并发时，可能读到半套规则。
+差别在时效。默认部署由服务器反代 GitHub，Fastly 边缘缓存仍在路径上（时效见 §9.1），服务器侧
+也绕不过去：incidents `2026-08-19` 里试过的三种绕过办法都无效。`--with-rules` 让主路径不经过
+任何缓存，nginx 直接读发布目录，读到即当前内容。改完规则要尽快生效时开 `--with-rules`。
+
+`--with-rules` 下不直接把 git 工作副本交给 nginx，原因有两个，且都与正确性有关：`/root` 是
+0700，www-data 穿不进去；`git fetch` 合并工作副本与 nginx 读文件并发时，可能读到半套规则。
 发布目录用独立权限（0755 / 文件 0644）和临时文件 `mv` 解决这两点。
 
 ACL4SSR 的 9 个规则集不跟着自托管，判据是「谁维护、多久更新一次、是否要求改完立刻生效」：
 上游按天更新，客户端 `interval: 86400`，自托管换不来时效收益。如果实测 jsdelivr 在客户端
-网络里不可用，正确做法是按同一结构把它们也纳入本地发布，而不是退回
+网络里不可用，正确做法是按同一结构把它们也改由本站提供，而不是退回
 `raw.githubusercontent.com`。
-
-GitHub 反代只是兜底：仅当发布目录缺文件时由服务器侧回源，客户端始终只连 `8443`。缓存
-约束见 §9.3。

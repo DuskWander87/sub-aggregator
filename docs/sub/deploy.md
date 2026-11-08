@@ -57,14 +57,16 @@ tools/deploy.sh
    3x-ui 只读不写；443 入站或 2096 收口不符合预期时给出警告。
 5. 确认后备份到 `/root/sub-aggregator-backup-<时间戳>-<pid>/`，把 `server/` 复制到临时目录
    并替换域名、证书目录、订阅端口、显示名、规则前缀和规则仓库。
-6. 安装 subconverter、管理脚本、systemd 单元、Nginx 片段、兜底缓存目录和 ACME 挑战路径；
+6. 安装 subconverter、管理脚本、systemd 单元、Nginx 片段、规则反代的缓存目录和 ACME 挑战路径；
    重启 subconverter，校验并启动/重载 Nginx。
 7. 签发或复用证书：缺少证书时安装 acme.sh、用 webroot 签发并安装到 `/root/cert/<域名>/`；
    然后按 [certificates.md](certificates.md) §2.2 对齐续期方式和 hook。部署过程中只 reload
    Nginx、不重启 x-ui；面板或原生订阅也用这张证书时，结束时提示手工重启 x-ui。
 8. 如果加了 `--with-rules`，启用本机规则发布：规则仓库默认是作者的，工作副本不存在时
-   自动克隆，然后启用同步定时器并跑一次 `sub-rules-check`。不加时 Clash 分支仍含规则表，
-   两个自维护列表由服务器侧回源 GitHub 兜底，客户端只连本站订阅端口。
+   自动克隆，然后建发布目录、启用同步定时器并跑一次 `sub-rules-check`。不加时，同步脚本和
+   定时器单元照样装上，但不克隆仓库、不建发布目录、不启用定时器：Clash 分支照样包含规则表，
+   两个自维护列表由 Nginx 反代 GitHub 提供，客户端只连本站订阅端口。两种模式的差异见
+   [design.md](design.md) §9.1。
 9. 验证 x-ui / subconverter / nginx 状态、转换后端响应和 `nginx -t`，有订阅时检查订阅端口，
    打印 3x-ui 面板地址
    和建订阅的后续步骤。验证不通过时给出警告、以非 0 退出，并明确说明哪一项没过；已安装的
@@ -163,7 +165,7 @@ grep -rn 'sub.example.com\|<RULES_PREFIX>\|DuskWander\|shadowrocket-config' serv
 | `/root/cert/sub.example.com/` | 证书目录 | `sub-manager` |
 | `8443` | 订阅入口端口 | `sub-manager` 的 `PORT`、`rulesets.txt`、`sub-rules-check` |
 | `DuskWander` | 订阅显示名 | `sub-manager` 的 `PROFILE_NAME`（两个分支同源，不必改面板） |
-| `DuskWander87/shadowrocket-config` | GitHub 兜底规则仓库 | `sub-rules.conf` |
+| `DuskWander87/shadowrocket-config` | 规则仓库（Nginx 反代目标） | `sub-rules.conf` |
 | `/root/code/shadowrocket-config` | 规则仓库的本机工作副本 | `sub-rules-check`、`sub-rules-sync`、`sub-rules-sync.service` |
 
 前 3 行必须换成你自己的值。端口默认 `8443`，被占用时三处一起换成同一个空闲端口。后 3 行
@@ -192,7 +194,7 @@ install -m 0644 server/systemd/subconverter.service \
 systemctl daemon-reload
 systemctl enable --now subconverter
 
-# Nginx 片段、兜底缓存目录与 ACME 挑战路径
+# Nginx 片段、规则反代缓存目录与 ACME 挑战路径
 install -m 0644 server/nginx/snippets/sub-rules*.conf /etc/nginx/snippets/
 install -m 0644 server/nginx/conf.d/sub-rules-cache.conf /etc/nginx/conf.d/
 install -m 0644 server/nginx/conf.d/acme-challenge.conf /etc/nginx/conf.d/
@@ -240,13 +242,13 @@ sub-manager test
 
 ### 3.4 可选：本机发布规则
 
-Clash 分支的订阅始终包含规则表。作者维护的
+Clash 分支的订阅始终包含规则表，原生分支只有节点，所以本节只影响 Clash 客户端。作者维护的
 [DuskWander87/shadowrocket-config](https://github.com/DuskWander87/shadowrocket-config)
 提供 `ChinaDirect.list` 和 `Reject.list` 两个自维护列表，规则内容可以直接在仓库里看到。
-这两条 URL 指向本站订阅端口；没有本地发布目录时，由服务器侧回源 GitHub 兜底提供，客户端仍然
-只连本站，不直连 GitHub。本节启用的是本地副本，不是「是否使用规则表」：本地发布能让更新延迟确定
-（≤1 分钟），并在 GitHub 不可达时继续提供端点。为什么需要这一层，见
-[design.md](design.md) §9.4。
+这两条 URL 指向本站订阅端口，客户端只连本站，不直连 GitHub。默认部署没有本地发布目录，由
+Nginx 反代 GitHub 提供，push 后最长约 5.5 分钟才拉得到新版本。本节启用的是本地副本，不是
+「是否使用规则表」：本地发布把更新延迟压到 1 分钟以内，并在 GitHub 不可达时继续提供端点。
+两种模式的对比见 [design.md](design.md) §9.1，为什么需要这一层见 §9.4。
 
 手动部署时，把仓库克隆到默认工作副本路径，然后启用定时器：
 
@@ -272,11 +274,14 @@ tools/deploy.sh --with-rules
 tools/deploy.sh --with-rules --rules-repo <你的账号>/shadowrocket-config
 ```
 
+`--rules-repo` 不依赖 `--with-rules`：不加时，Nginx 改为反代你的仓库。fork 要保留 `main` 分支和
+`rules/` 下的两个文件名，反代地址和同步脚本都按这个结构取文件。
+
 工作副本不在 `/root/code/shadowrocket-config` 时，再加 `--rules-workdir <目录>`。手动部署则
 要改 `sub-rules-sync`、`sub-rules-check` 和 `sub-rules-sync.service` 里的 `REPO_DIR` /
-`ReadWritePaths`，以及 `sub-rules.conf` 兜底里的仓库名。
+`ReadWritePaths`，以及 `sub-rules.conf` 反代地址里的仓库名。
 
-工作副本的路径、发布目录和兜底缓存的设计见 [design.md](design.md) §9，日常更新见
+工作副本的路径、发布目录和反代缓存的设计见 [design.md](design.md) §9，日常更新见
 [operations.md](operations.md) §2。
 
 ### 3.5 收口 2096
@@ -338,15 +343,10 @@ systemctl is-active x-ui subconverter nginx
 curl -fsS http://127.0.0.1:25500/version
 sub-manager list
 sub-manager test
+sub-rules-check                                   # 规则端点，按部署方式选检查项（见 operations.md §2）
 nginx -t
 /root/.acme.sh/acme.sh --list                     # 用 acme.sh 签发时：证书与下次续期时间
 openssl x509 -in /root/cert/sub.example.com/fullchain.pem -noout -enddate
-```
-
-启用本机规则发布后再跑：
-
-```bash
-sub-rules-check
 ```
 
 ## 6. 卸载
@@ -421,4 +421,7 @@ tools/uninstall.sh
 - **`sub-manager test` 失败**：先看是原始订阅拉取失败还是 Clash 转换失败。域名、证书、
   2096 回源和订阅入口端口都会影响结果，按 [operations.md](operations.md) §3.2 的验证基线逐层查。
 - **规则端点 404**：先确认已经至少创建一条订阅，`sub-manager` 生成的 server 块才会包含
-  `sub-rules.conf`。再确认发布目录和定时器状态，跑 `sub-rules-check`。
+  `sub-rules.conf`。默认部署再确认 `--rules-repo` 指向的仓库存在，且 `main` 分支的 `rules/`
+  下有这两个文件，端点会原样转发 GitHub 的 404；启用了 `--with-rules` 则查发布目录和定时器。
+  两种情况都可以先跑 `sub-rules-check`：默认部署下端点失败时，它会再去 GitHub 取一次原文，
+  分清问题出在本站还是上游。

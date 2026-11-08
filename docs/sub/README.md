@@ -44,15 +44,21 @@ VLESS Reality 故障排查全过程，全文使用占位符，可公开分享。
 各返回什么，见 [unified-subscription.md](unified-subscription.md)；为什么这样分、它带来的
 可观察差异，见 [design.md](design.md) §2。
 
-规则集分发是独立的第二条链路：
+规则集分发是独立的第二条链路，只服务 Clash 分支。原生分支只有节点，不引用任何规则集，见
+[unified-subscription.md](unified-subscription.md) §3。两个自维护列表都由 Nginx :8443 提供，
+来源取决于部署时是否加 `--with-rules`：
 
 ```text
-git push -> sub-rules-sync.timer（每分钟）-> /var/lib/sub-rules/
-  -> Nginx :8443 直接 serve -> Mihomo rule-provider
+默认部署
+  GitHub -> Nginx :8443 反代（本机缓存 30 秒）-> Mihomo rule-provider
+
+--with-rules
+  git push -> sub-rules-sync.timer（每分钟）-> /var/lib/sub-rules/
+    -> Nginx :8443 直接 serve -> Mihomo rule-provider（发布目录缺文件时回落到 GitHub 反代）
 ```
 
-架构见 [design.md](design.md) §9，自维护规则为什么走本机发布见 §9.4；日常更新步骤见
-[operations.md](operations.md) §2。
+本机是默认部署，没有启用 `--with-rules`。两种模式的差异见 [design.md](design.md) §9.1，
+自维护规则为什么由本站提供见 §9.4；日常更新见 [operations.md](operations.md) §2。
 
 ## 3. 速查
 
@@ -88,19 +94,19 @@ SNI/fallback 分流。代价是 Clash 客户端会显示 `sub.example.com:8443`�
 
 ```text
 /usr/local/sbin/sub-manager             # 订阅管理脚本（0700，仅 root）
-/usr/local/sbin/sub-rules-sync          # 规则同步：git → 发布目录（0700，仅 root）
-/usr/local/sbin/sub-rules-check         # 规则集一致性诊断（0750，只读）
+/usr/local/sbin/sub-rules-sync          # 规则同步：git → 发布目录（0700，仅 root；--with-rules 才用）
+/usr/local/sbin/sub-rules-check         # 规则集一致性诊断（0750，只读；按部署方式检查）
 /etc/sub-manager/clients.json           # 订阅状态（0600，目录 0700）
 /etc/nginx/conf.d/private-sub.conf      # 【脚本生成，勿手改】
-/etc/nginx/conf.d/sub-rules-cache.conf  # proxy_cache_path 缓存区（仅兜底路径用）
+/etc/nginx/conf.d/sub-rules-cache.conf  # proxy_cache_path 缓存区（GitHub 反代用）
 /etc/nginx/conf.d/acme-challenge.conf   # 80 端口 ACME 挑战（server_name = 订阅域名）
-/etc/nginx/snippets/sub-rules.conf      # 规则端点：本地文件优先 + GitHub 反代兜底
+/etc/nginx/snippets/sub-rules.conf      # 规则端点：有发布目录读本地文件，否则反代 GitHub
 /etc/nginx/snippets/sub-rules-common.conf
 /etc/nginx/snippets/sub-rules-upstream.conf
-/etc/systemd/system/sub-rules-sync.{service,timer}
+/etc/systemd/system/sub-rules-sync.{service,timer}  # 默认部署只装不启用
 /etc/systemd/system/subconverter.service
-/root/code/shadowrocket-config/         # 规则仓库 git 工作副本（0755，root）
-/var/lib/sub-rules/                     # 发布目录，nginx 直接 serve（0755，文件 0644）
+/root/code/shadowrocket-config/         # 规则仓库 git 工作副本（0755，root；仅 --with-rules）
+/var/lib/sub-rules/                     # 发布目录，nginx 直接 serve（0755，文件 0644；仅 --with-rules）
 /opt/subconverter-classic/              # 转换后端（pref.ini / base/ / snippets/）
 /root/cert/sub.example.com/             # Let's Encrypt 证书（acme.sh webroot 续期）
 /root/.acme.sh/                         # acme.sh 本体、账户与续期配置（root crontab 每日调用）
