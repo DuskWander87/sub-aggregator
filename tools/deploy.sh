@@ -407,6 +407,24 @@ acme_sudo_blocked() {
     [[ -t 1 ]] && sudo_env_blocked
 }
 
+# 复用 CERT_DIR 的证书前检查有效期。过期证书照样能通过 nginx -t，订阅入口却全部 TLS
+# 失败，所以过期时改为签发到同一目录；certbot 的目录归 certbot 管，只提示它续期。
+# reuse_cert <日志后缀>
+reuse_cert() {
+    if ! have openssl || openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1; then
+        log "证书：复用 $CERT_DIR$1"
+        return 0
+    fi
+    if cert_dir_is_certbot; then
+        fail "证书 $CERT_DIR 已过期，由 certbot 管理：先执行 certbot renew --cert-name $(basename -- "$CERT_DIR")，再重跑。"
+    fi
+    if [[ $ISSUE_CERT -eq 0 ]]; then
+        fail "证书 $CERT_DIR 已过期。去掉 --no-issue-cert 让脚本重签，或换上有效证书后重跑。"
+    fi
+    CERT_NEEDS_ISSUE=1
+    log "证书：$CERT_DIR$1 已过期，将用 acme.sh 重签到该目录"
+}
+
 # 证书目录从域名推导，不再向用户提问。查找顺序：默认目录 → certbot → acme.sh 安装记录，
 # 都没有时签发到默认目录。--cert-dir 仍然可以覆盖。
 resolve_cert_dir() {
@@ -416,21 +434,21 @@ resolve_cert_dir() {
         for candidate in "$DEFAULT_CERT_ROOT/$DOMAIN" "$CERTBOT_DIR/live/$DOMAIN"; do
             if cert_files_ok "$candidate"; then
                 CERT_DIR=$candidate
-                log "证书：复用 $CERT_DIR"
+                reuse_cert ""
                 return 0
             fi
         done
         if conf=$(acme_conf_file "$DOMAIN") && candidate=$(acme_installed_paths "$conf") \
             && cert_files_ok "$candidate"; then
             CERT_DIR=$candidate
-            log "证书：复用 $CERT_DIR（来自 acme.sh 安装记录）"
+            reuse_cert "（来自 acme.sh 安装记录）"
             return 0
         fi
         CERT_DIR="$DEFAULT_CERT_ROOT/$DOMAIN"
     fi
 
     if cert_files_ok "$CERT_DIR"; then
-        log "证书：复用 $CERT_DIR"
+        reuse_cert ""
         return 0
     fi
     if [[ $ISSUE_CERT -eq 0 ]]; then
@@ -1250,8 +1268,8 @@ issue_cert() {
         fi
     fi
 
-    # 这个分支只在首次部署且 acme.sh 里已有一张有效证书时可达；已有部署的安装副本
-    # 缺失会先被 preflight 拦下，按 certificates.md §4 手工恢复。签发成功或跳过都
+    # 这个分支在首次部署、或复用的证书已过期时可达；已有部署的安装副本缺失会先被
+    # preflight 拦下，按 certificates.md §4 手工恢复。签发成功或跳过都
     # 要继续走 --install-cert 落盘，不能当成失败。
     if (( rc != 0 && rc != 2 )); then
         fail "acme.sh 签发失败（退出码 $rc）。确认 $DOMAIN 已解析到本机、公网 80 端口可达。"

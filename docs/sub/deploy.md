@@ -58,7 +58,7 @@ tools/deploy.sh
    并替换域名、证书目录、订阅端口、显示名、规则前缀和规则仓库。
 6. 安装 subconverter、管理脚本、systemd 单元、Nginx 片段、规则反代的缓存目录和 ACME 挑战路径；
    重启 subconverter，校验并启动/重载 Nginx。
-7. 签发或复用证书：缺少证书时安装 acme.sh、用 webroot 签发并安装到 `/root/cert/<域名>/`；
+7. 签发或复用证书：缺少证书或证书已过期时安装 acme.sh、用 webroot 签发并安装到 `/root/cert/<域名>/`；
    然后按 [certificates.md](certificates.md) §2.2 对齐续期方式和 hook。部署过程中只 reload
    Nginx、不重启 x-ui；面板或原生订阅也用这张证书时，结束时提示手工重启 x-ui。
 8. 如果加了 `--with-rules`，启用本机规则发布：规则仓库默认是作者的，工作副本不存在时
@@ -103,7 +103,7 @@ tools/deploy.sh --domain sub.example.com --with-rules --yes
 | `--domain <域名>` | 订阅域名；省略时从 3x-ui 配置或证书推导 |
 | `--cert-dir <目录>` | 证书目录；默认自动查找，缺失时签发到 `/root/cert/<域名>` |
 | `--acme-email <邮箱>` | 可选：安装 acme.sh 时写入 ACME 账户联系邮箱 |
-| `--no-issue-cert` | 缺少证书时不自动签发，直接报错 |
+| `--no-issue-cert` | 缺少证书或证书已过期时不自动签发，直接报错 |
 | `--port <端口>` | 订阅入口端口，默认 `8443`；被占用时换一个，不能是 80 / 443 / 2096 / 25500 |
 | `--profile-name <名称>` | 订阅显示名，纯 ASCII，默认 `DuskWander87` |
 | `--rules-prefix <hex>` | 规则端点前缀，默认随机生成 24 位 hex |
@@ -136,6 +136,8 @@ privkey.pem      # 私钥（0600）
 5. 都没有时自动签发到 `/root/cert/<域名>/`。
 
 复用的证书必须覆盖订阅域名，否则脚本在 preflight 就报错，不备份、不安装任何聚合层文件。
+找到的证书已过期时不复用，改为签发到同一目录（加了 `--no-issue-cert` 时报错）；certbot
+目录里的证书归 certbot 管，过期时报错并提示先 `certbot renew`。
 
 自动签发走 ACME HTTP-01：脚本安装 `/etc/nginx/conf.d/acme-challenge.conf`（监听 80，
 `server_name` 是订阅域名），acme.sh 以 `--webroot /var/www/acme` 写入挑战文件，签发 EC-256

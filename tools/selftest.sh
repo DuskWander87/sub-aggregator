@@ -198,14 +198,15 @@ st_gen_ca() {
         -out "$CA_DIR/$name.crt" 2>/dev/null
 }
 
-# st_sign_leaf <ca> <输出目录> ：写 <域名>.key、<域名>.cer、fullchain.cer
+# st_sign_leaf <ca> <输出目录> [有效天数] ：写 <域名>.key、<域名>.cer、fullchain.cer。
+# 天数为负时证书已过期。
 st_sign_leaf() {
-    local ca=$1 dir=$2
+    local ca=$1 dir=$2 days=${3:-90}
     install -d -m 0700 "$dir"
     openssl ecparam -name prime256v1 -genkey -noout -out "$dir/$D.key" 2>/dev/null
     openssl req -new -key "$dir/$D.key" -subj "/CN=$D" -out "$dir/$D.csr" 2>/dev/null
     openssl x509 -req -in "$dir/$D.csr" -CA "$CA_DIR/$ca.crt" -CAkey "$CA_DIR/$ca.key" \
-        -set_serial "0x$(openssl rand -hex 8)" -days 90 \
+        -set_serial "0x$(openssl rand -hex 8)" -days "$days" \
         -extfile <(printf 'subjectAltName=DNS:%s\n' "$D") -out "$dir/$D.cer" 2>/dev/null
     cat "$dir/$D.cer" "$CA_DIR/$ca.crt" >"$dir/fullchain.cer"
     rm -f -- "$dir/$D.csr"
@@ -628,6 +629,54 @@ t13() {
             "hook 0755 含 reload nginx；提示 certbot reconfigure；别的证书续期时 hook 不动作" \
             "mode=$mode content=$(oneline "$content")；别的证书：$(oneline "$other")；本证书：$(oneline "$own")；$(oneline "$OUT")"
     fi
+}
+
+# st_put_cert <有效天数> <目录> ：签一张证书装成 fullchain.pem / privkey.pem；天数为负即已过期。
+st_put_cert() {
+    st_sign_leaf le "$SANDBOX/leaf" "$1"
+    install -d -m 0700 "$2"
+    cp -- "$SANDBOX/leaf/fullchain.cer" "$2/fullchain.pem"
+    cp -- "$SANDBOX/leaf/$D.key" "$2/privkey.pem"
+}
+
+b_resolve() {
+    CERT_DIR=""
+    ISSUE_CERT=${1:-1}
+    resolve_cert_dir
+    printf 'NEED=%s DIR=%s\n' "$CERT_NEEDS_ISSUE" "$CERT_DIR"
+}
+b_resolve_issue() { CERT_DIR=""; resolve_cert_dir; issue_cert; normalize_acme_renewal; }
+
+t41() {
+    local valid expired noissue certbot renewed wr
+    st_reset
+    st_put_cert 90 "$CERT"
+    run_deploy b_resolve
+    valid="rc=$RC $(oneline "$OUT")"
+    st_put_cert -1 "$CERT"
+    run_deploy b_resolve
+    expired="rc=$RC $(oneline "$OUT")"
+    run_deploy b_resolve 0
+    noissue="rc=$RC $(oneline "$OUT")"
+    rm -rf -- "$CERT"
+    st_put_cert -1 "$ROOT/etc/letsencrypt/live/$D"
+    run_deploy b_resolve
+    certbot="rc=$RC $(oneline "$OUT")"
+
+    # 真机场景：acme.sh standalone 续期一直失败，安装副本已过期，conf 早过了续期时间。
+    st_reset
+    seed_acme le no
+    conf_set "$(acme_conf)" Le_NextRenewTime "$(( $(date +%s) - 86400 ))"
+    st_put_cert -1 "$CERT"
+    run_deploy b_resolve_issue
+    renewed="rc=$RC"
+    openssl x509 -in "$CERT/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1 \
+        && renewed+=" valid" || renewed+=" expired"
+    wr=$(conf_get "$(acme_conf)" Le_Webroot)
+    st_check T41 "复用证书前检查有效期：过期则重签到原目录，certbot 与 --no-issue-cert 报错" \
+        "有效 NEED=0；过期 NEED=1 DIR=$CERT；--no-issue-cert 失败；certbot 失败含 certbot renew；重签后 rc=0 valid 且 webroot" \
+        "$valid | $expired | $noissue | $certbot | $renewed Le_Webroot=$wr $(oneline "$OUT")" \
+        eval '[[ $valid == "rc=0 "*"NEED=0 DIR=$CERT" && $expired == "rc=0 "*"已过期"*"NEED=1 DIR=$CERT" && $noissue != "rc=0 "* && $noissue == *"已过期"* && $certbot != "rc=0 "* && $certbot == *"certbot renew"* && $renewed == "rc=0 valid" && $wr == "$WEBROOT" ]]'
 }
 
 # ---------- Phase 2：回滚、恢复与中断 ----------
@@ -1304,6 +1353,7 @@ main() {
     t38
     t39
     t40
+    t41
 
     printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
     (( FAILED == 0 ))

@@ -8,6 +8,61 @@
 
 ---
 
+## 2026-11-08 证书过期，续期一直卡在 standalone
+
+### 现象
+
+所有设备更新订阅失败。`sub-manager test` 第一条就停在 `curl: (60) SSL certificate problem:
+certificate has expired`，报「无法获取 3x-ui 原始订阅」。
+
+### 排查
+
+- 服务、端口、`nginx -t`、subconverter 全部正常；2096 已收口，`/etc/hosts` 映射存在。
+- `/root/cert/sub.example.com/fullchain.pem` 自 08-07 起未更新，`notAfter` 是 11-05；8443、
+  2096 发出的都是这张证书。
+- acme.sh conf：`Le_Webroot='no'`（standalone），`Le_ReloadCmd` 是 `x-ui restart`，即 3x-ui
+  安装脚本签发时留下的配置；ARI 建议的续期时间是 10-07。`acme-challenge.conf` 与
+  `/var/www/acme` 都不存在。
+- 发行版 nginx 08-08 安装后，`sites-enabled/default` 一直占着 80 端口。手工跑
+  `acme.sh --cron` 复现：`tcp port 80 is already used by nginx`，`Please stop it first`。
+  crontab 把输出丢进 `/dev/null`，每天四次失败都没有留下痕迹。
+- 这台机器的聚合层部署在 `deploy.sh` 加入 webroot 续期对齐之前，从未执行过
+  `normalize_acme_renewal`。
+- 用当时的 `deploy.sh --dry-run` 预演重装：它对这张过期证书打印「复用已有证书」，不会重签，
+  装完证书仍然过期，要等下一次 cron 才能续上。
+
+### 被排除的方向
+
+- 不是近期的软件升级：nginx（10-27）与 acme.sh 自动升级（11-07）都晚于续期开始失败的时间，
+  证书文件自 08-07 起就没有被改写过。
+- 不是 reload hook 缺失：磁盘上的文件本身就是旧的，不是「文件已换、进程没重载」。
+- 不是 DNS 或防火墙：公网解析指向本机，ufw 未启用；改为 webroot 后一次签发成功。
+
+### 根因
+
+续期方式是 standalone，而 Nginx 占用 80 端口，acme.sh 每次续期都在检查端口时退出；证书到期后，
+面板、2096、8443 同时失效。`deploy.sh` 复用证书时只检查文件存在和域名匹配，不检查有效期，
+重装也不会立刻修好。
+
+### 解决方案
+
+- `deploy.sh` 新增 `reuse_cert`：复用前用 `openssl x509 -checkend 0` 检查有效期。过期时改为
+  签发到同一目录；加了 `--no-issue-cert` 时报错；certbot 目录的证书报错并提示 `certbot renew`。
+- 重跑 `tools/deploy.sh`：装上 `acme-challenge.conf`，用 webroot 重签，`Le_Webroot` 对齐为
+  `/var/www/acme`，hook 补上 `systemctl reload nginx`；随后手工 `systemctl restart x-ui`。
+- 文档：`deploy.md` §2.4 写明过期证书的处理；`certificates.md` §4 补上 standalone 这一失败
+  原因和手工跑 `acme.sh --cron` 的诊断方法。
+
+### 验证
+
+- `tools/selftest.sh` 的 T41 先红后绿（有效证书复用、过期证书重签到原目录、
+  `--no-issue-cert` 与 certbot 报错、standalone 场景重签后证书有效且续期方式为 webroot），
+  T1–T40 保持通过。
+- 真机：8443 与 2096 的 `notAfter` 均为 2027-02-06；acme.sh conf 为 `Le_Webroot='/var/www/acme'`；
+  `sub-manager test` 7 条订阅全部通过。
+
+---
+
 ## 2026-11-07 重装时订阅配置与证书目录沿用旧状态
 
 ### 现象

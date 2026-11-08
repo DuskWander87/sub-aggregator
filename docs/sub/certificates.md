@@ -160,7 +160,18 @@ systemctl is-active x-ui nginx subconverter        # 使用证书的服务
 
 - 域名的 A/AAAA 记录不再指向本机，或公网 80 端口不通；
 - `/etc/nginx/conf.d/acme-challenge.conf` 被删掉，或 `/var/www/acme` 不可写；
+- acme.sh conf 的 `Le_Webroot` 是 `no`（standalone）：Nginx 占着 80 端口，每次续期都报
+  `tcp port 80 is already used`；
 - reload hook 丢失，文件已更新但进程仍在发旧证书。
+
+cron 任务把输出丢进 `/dev/null`，续期失败不会留下任何痕迹。怀疑续期有问题时手工跑一次，
+看它停在哪一步：
+
+```bash
+/root/.acme.sh/acme.sh --cron --home /root/.acme.sh
+```
+
+续期方式不对时重跑 `deploy.sh`，它按 §2.2 对齐为 webroot；证书已经过期时它会顺带重签。
 
 如果只是 `/root/cert/<域名>/` 下的安装副本被删、而 acme.sh 自己目录里的证书仍在有效期内，
 先把文件重新落盘，再重跑 `deploy.sh`，不需要等续期时间：
