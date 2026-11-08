@@ -82,7 +82,7 @@ UA 白名单（脚本常量 `UA_CLASH_PATTERN`，大小写不敏感）：
 
 ## 4. 为什么不用 subconverter 的 `target=auto`
 
-subconverter 原生支持 `target=auto`，按 UA 自动选格式。本机实测可用：Clash 家族 UA 返回
+subconverter 原生支持 `target=auto`，按 UA 自动选格式。实测可用：Clash 家族 UA 返回
 YAML，`Shadowrocket/*` 返回 Base64，未知 UA 返回 **HTTP 400 `Invalid target!`**。
 
 没有采用，因为它会让**非 Clash 客户端也经过 subconverter 重新拼装节点链接**，实测有四处
@@ -148,7 +148,7 @@ return 419;
 
 3x-ui 订阅服务默认监听所有地址，`https://<域名>:2096/sub/<subId>` 这样的原始订阅地址在公网
 可用（除非防火墙或云安全组挡住 2096）。收口是把它限制到 `127.0.0.1:2096`，公网订阅入口只剩
-`8443`。部署脚本不改 3x-ui，收口要手工做，步骤见 [deploy.md](deploy.md) §3.5。本机未收口。
+`8443`。部署脚本不改 3x-ui，收口要手工做，步骤见 [deploy.md](deploy.md) §3.5。
 
 收不收口，决定了收回一个人的访问要做几步。原生分支透传上游的 `Profile-Web-Page-Url`，值形如
 `https://<域名>/sub/<subId>`，带着该客户端的 `subId`；用过聚合地址的人都能据此拼出原始订阅

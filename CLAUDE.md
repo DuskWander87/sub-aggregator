@@ -2,14 +2,17 @@
 
 ## 这是什么
 
-这个仓库是一套运行中服务的运维文档和脱敏配置副本。服务装在这台 Ubuntu 24.04 服务器上：
-3x-ui（VLESS Reality 节点 + 面板）和订阅聚合服务 sub-aggregator。仓库里的 `server/` 和
-`docs/` 不参与运行，真正生效的是本机对应路径（见下文）。
+这个仓库是订阅聚合服务 sub-aggregator 的部署工具、脱敏配置和运维文档，面向已经运行 3x-ui
+（VLESS Reality 节点 + 面板）的 Ubuntu 24.04 服务器。仓库里的 `server/` 和 `docs/` 不参与
+运行，真正生效的是部署后服务器上的对应路径（见下文）。
 
 因此它的用法和普通代码仓库相反：
 
 > **改文档不会改变任何行为；改服务器不会自动更新文档。**
 > 两边只能手工同步：服务器上做了什么变更，就回写到对应文档。
+
+部署方式由使用者选择（是否 `--with-rules`、是否收口 2096、订阅端口、显示名等），文档按选项
+描述，不记录任何一台服务器选了哪一项；要知道某台服务器的实际状态，给出查询命令。
 
 ## 文档索引
 
@@ -74,7 +77,7 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 /root/cert/sub.example.com/             # Let's Encrypt 证书（acme.sh webroot 续期）
 /root/.acme.sh/                         # acme.sh 本体、账户与续期配置（root crontab 每日调用）
 /var/www/acme/                          # ACME webroot（acme.sh 写入，Nginx 读取）
-/etc/hosts                              # 仅 2096 收口时：订阅域名 → 127.0.0.1（本机未收口，无此映射）
+/etc/hosts                              # 仅 2096 收口时：订阅域名 → 127.0.0.1
 /etc/x-ui/x-ui.db                       # 3x-ui 数据库
 ```
 
@@ -85,8 +88,8 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 |---|---|
 | `80` | Nginx（仅 ACME HTTP-01 挑战） |
 | `443` | Xray VLESS Reality（**不要碰**） |
-| `2096` | 3x-ui 原生订阅（订阅入口原生分支的回源目标；默认监听所有地址，收口到 `127.0.0.1` 可选，本机未收口） |
-| `8443` | Nginx（订阅入口 + 自维护规则端点；`deploy.sh --port` 的默认值，本机用默认） |
+| `2096` | 3x-ui 原生订阅（订阅入口原生分支的回源目标；默认监听所有地址，收口到 `127.0.0.1` 可选） |
+| `8443` | Nginx（订阅入口 + 自维护规则端点；`deploy.sh --port` 的默认值） |
 | `25500` | Subconverter（**仅 `127.0.0.1`**） |
 
 3x-ui 面板端口/路径由面板设置（`webPort` / `webBasePath`）决定，不占固定端口，也不写进
@@ -95,7 +98,7 @@ README §3.1。
 
 ## `server/` 公开镜像
 
-`server/` 是把本机四类配置（`sbin/`、`nginx/`、`subconverter/`、`systemd/`）收进仓库的**脱敏
+`server/` 是把服务器上四类配置（`sbin/`、`nginx/`、`subconverter/`、`systemd/`）收进仓库的**脱敏
 拷贝**，与 `docs/` 一起对外发布。它同时是 `tools/deploy.sh` 的安装源：部署时整个复制出来、
 替换占位符后装到真机，所以改 `server/` 会改变下一次部署的结果。CLAUDE.md 也随仓库版本化，
 因此本文件同样遵守脱敏规则：不写真实域名、订阅路径与客户端名。改真机对应文件时同步
@@ -134,7 +137,7 @@ sub-rules-check                     # 规则端点诊断，按部署方式选检
 sub-rules-sync                      # --with-rules 时手工同步一次（push 后想跳过 1 分钟等待时用）
 ```
 
-本机是默认部署，没有启用 `--with-rules`，规则端点反代 GitHub。
+已部署的是哪种方式，看 `sub-rules-check` 输出的「部署方式」一行。
 
 `list` 会只读查 `/etc/x-ui/x-ui.db`，显示每条订阅属于哪个面板客户端，并报告双向漂移
 （x-ui 有客户端却无地址 / 地址已无对应客户端）。**面板增删客户端不会自动改动聚合地址**，
@@ -142,8 +145,8 @@ sub-rules-sync                      # --with-rules 时手工同步一次（push 
 
 每个订阅只有**一条地址**，形如 `https://sub.example.com:8443/<48 位随机 hex>#<订阅名>`：
 路径不带前缀，按 UA 分流，Clash 与原生客户端通用，`?t=clash` / `?t=raw` 强制指定。判定规则见
-`docs/sub/unified-subscription.md` §2，那里是单一事实源；地址形态与 `<订阅名>` 的当前值见
-`docs/sub/README.md` §3.4。示例中的 `sub.example.com` 是占位符，本机真实域名见
+`docs/sub/unified-subscription.md` §2，那里是单一事实源；地址形态与 `<订阅名>` 的默认值见
+`docs/sub/README.md` §3.4。示例中的 `sub.example.com` 是占位符，部署后的实际域名见
 `sub-manager` 的 `HOST` 常量。
 
 改了 `base/all_base.tpl` 或 `snippets/*.txt` 之后，**先重启再 resync**（`cache_config=300`
@@ -157,7 +160,7 @@ systemctl restart subconverter && sub-manager resync
 
 ```bash
 systemctl is-active x-ui subconverter nginx
-ss -lntp | grep -E ':(80|443|2096|8443|25500)\b'   # 本机未收口，2096 监听所有地址；收口后只应有 127.0.0.1
+ss -lntp | grep -E ':(80|443|2096|8443|25500)\b'   # 2096 默认监听所有地址；收口后只应有 127.0.0.1
 ss -lntp | grep x-ui                               # 面板端口随面板设置变化
 getent hosts sub.example.com                            # 占位符换成实际订阅域名；收口后必须返回 127.0.0.1
 curl -fsS http://127.0.0.1:25500/version
@@ -179,7 +182,7 @@ nginx -t
 - **订阅名两处同源**：Clash 分支取 `PROFILE_NAME`（`Content-Disposition`），原生分支由 Nginx
   用同一个常量覆盖上游 `Profile-Title`，不读 3x-ui 面板的「订阅标题」；Shadowrocket 只认 URL
   fragment `#<订阅名>`，那是客户端本地行为。改 `PROFILE_NAME` 后 `resync` 即可，名字保持纯
-  ASCII。当前值见 README §3.4。incidents `2026-08-22`
+  ASCII。默认值见 README §3.4。incidents `2026-08-22`
 - **改路径 = 所有设备重配**：只有 `rotate` 会换路径，它保留编号与原始订阅，不必重输 URL；
   `resync` 只重建 Nginx 配置，编号和地址都不动。改域名同样需要所有设备重配，`deploy.sh` 会在
   摘要里标出域名变更。
@@ -187,9 +190,9 @@ nginx -t
   之后的 `update` / `rotate` / `remove` 要用新编号。
 - **`rotate` / `remove` ≠ 收回节点访问**：`sub-manager` 对 x-ui / `*.db` 零写操作，它们只
   作废分发通道，已拉取 profile 里的 UUID 仍然有效。真正踢人要去 3x-ui 删掉该客户端或更换
-  UUID；2096 未收口时（本机即是）还要重置 `subId`，因为原生分支透传的 `Profile-Web-Page-Url`
+  UUID；2096 未收口时还要重置 `subId`，因为原生分支透传的 `Profile-Web-Page-Url`
   会带出它。见 unified-subscription §6。
-- **2096 收口是可选项，本机未做**：收口后订阅域名必须解析到 `127.0.0.1`，否则 Clash 分支报
+- **2096 收口是可选项**：收口后订阅域名必须解析到 `127.0.0.1`，否则 Clash 分支报
   「本地转换失败」，原生分支正常。先加 `/etc/hosts` 映射再改 `subListen`，中间不会断。
   incidents `2026-10-18`
 - **证书续期走 80 端口 webroot**：`acme-challenge.conf` 与 `/var/www/acme` 是续期链路的一部分；

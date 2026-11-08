@@ -176,8 +176,8 @@ sub-manager remove sub-1
 删除成功后，该订阅的地址立即返回 404，其他订阅不受影响。
 
 > `rotate` / `remove` 作废的只是配置分发通道。客户端已经拉到的配置不会消失，里面的 VLESS
-> UUID 仍然有效。要真正收回节点访问，去 3x-ui 面板删掉该客户端或更换 UUID。2096 未收口时
-> （本机即是），拿到过聚合地址的人还能从原生分支的响应头读到 `subId`、直连原始订阅，所以
+> UUID 仍然有效。要真正收回节点访问，去 3x-ui 面板删掉该客户端或更换 UUID。2096 未收口时，
+> 拿到过聚合地址的人还能从原生分支的响应头读到 `subId`、直连原始订阅，所以
 > 聚合地址泄露也要按 §1.4 一并重置 `subId`。细节见
 > [unified-subscription.md](unified-subscription.md) §6。
 
@@ -252,7 +252,7 @@ sub-manager renumber 101
 ## 2. 更新自维护规则
 
 **不需要在服务器执行任何命令。** push 之后多久拉得到，取决于部署时是否加了 `--with-rules`
-（本机没有加，见 [README.md](README.md) §2）：
+（判断方法见 [README.md](README.md) §2）：
 
 ```text
 默认部署
@@ -313,7 +313,7 @@ ss -lntp | grep -E ':(80|443|2096|8443|25500)\b'
 ss -lntp | grep x-ui                                      # 面板端口随面板设置变化
 ```
 
-`2096` 默认监听所有地址，本机如此。收口后（可选，见 [deploy.md](deploy.md) §3.5）应只出现
+`2096` 默认监听所有地址。收口后（可选，见 [deploy.md](deploy.md) §3.5）应只出现
 `127.0.0.1:2096`，订阅域名也要解析到回环地址，供 subconverter 回源：
 
 ```bash
@@ -439,7 +439,8 @@ df -h /
 | Subconverter | 约 2 MB | 约 3.5 MB |
 | Nginx | 约 3.7 MB | 约 5.6 MB |
 
-部署完成时系统仍有约 965 MB available 内存，根分区剩余约 15 GB。明显偏离这个量级时值得查。
+在 [design.md](design.md) §1 的验证环境上，部署完成时系统仍有约 965 MB available 内存，
+根分区剩余约 15 GB。明显偏离这个量级时值得查。
 
 ## 4. 备份范围
 

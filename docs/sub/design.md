@@ -7,7 +7,7 @@
 
 ## 1. 部署前环境
 
-服务器环境：
+设计与验证所用的服务器环境：
 
 - Ubuntu 24.04.4 LTS
 - x86_64，2 核 CPU
@@ -86,7 +86,7 @@ asdlokj1qpi233/subconverter v0.9.9
 - 常驻内存约 2 MB。
 - 真实订阅转换测试稳定通过。
 
-`Aethersailor/SubConverter-Extended v1.3.0` 在这台 Ubuntu 服务器上有稳定性问题，不要再选它，
+`Aethersailor/SubConverter-Extended v1.3.0` 在 §1 的验证环境上有稳定性问题，不要再选它，
 排查过程见 [incidents.md](incidents.md) `2026-08-08 部署期问题合集`。
 
 ### 3.4 反向代理选择
@@ -549,8 +549,8 @@ rules:
 | GitHub 不可达时 | 返回本机缓存的最后一份（`inactive=30d`），从没缓存过就拉取失败 | 不受影响，同步失败也照常 serve 发布目录 |
 | 服务器上多出 | 无 | 规则仓库工作副本、发布目录，启用中的 `sub-rules-sync.timer` |
 
-`--rules-repo` 两种模式都生效：默认部署改的是反代目标，`--with-rules` 改的是克隆来源。本机是默认
-部署，见 [README.md](README.md) §2。
+`--rules-repo` 两种模式都生效：默认部署改的是反代目标，`--with-rules` 改的是克隆来源。判断
+已部署的是哪种，见 [README.md](README.md) §2。
 
 ACL4SSR 保持 jsdelivr：上游按天更新，不存在「改完想立刻生效」的诉求，无需自托管。
 

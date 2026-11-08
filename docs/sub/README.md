@@ -58,8 +58,9 @@ VLESS Reality 故障排查全过程，全文使用占位符，可公开分享。
     -> Nginx :8443 直接 serve -> Mihomo rule-provider（发布目录缺文件时回落到 GitHub 反代）
 ```
 
-本机是默认部署，没有启用 `--with-rules`。两种模式的差异和时效见 [design.md](design.md) §9.1，
-自维护规则为什么由本站提供见 §9.4；日常更新见 [operations.md](operations.md) §2。
+`sub-rules-check` 输出的「部署方式」一行给出当前是哪种。两种模式的差异和时效见
+[design.md](design.md) §9.1，自维护规则为什么由本站提供见 §9.4；日常更新见
+[operations.md](operations.md) §2。
 
 ## 3. 速查
 
@@ -71,7 +72,7 @@ VLESS Reality 故障排查全过程，全文使用占位符，可公开分享。
 |---|---|---|
 | `80` | Nginx | 仅 ACME HTTP-01 挑战，其他路径 404 |
 | `443` | Xray VLESS Reality | 不要碰 |
-| `2096` | 3x-ui 原生订阅 | 订阅入口原生分支的回源目标；默认监听所有地址，本机未收口（见下） |
+| `2096` | 3x-ui 原生订阅 | 订阅入口原生分支的回源目标；默认监听所有地址，可选收口到 `127.0.0.1`（见下） |
 | `8443` | Nginx | 订阅入口 + 自维护规则端点；默认值，部署时可用 `--port` 改 |
 | `25500` | Subconverter | 仅 `127.0.0.1` |
 
@@ -81,7 +82,8 @@ VLESS Reality 故障排查全过程，全文使用占位符，可公开分享。
 `2096` 来自面板的 `subPort` 设置（未设置时默认 2096），同样不是固定契约；改端口后同步更新
 本表。它默认随 3x-ui 监听所有地址，原始订阅地址在公网可用（除非防火墙或云安全组挡住）。
 收口到 `127.0.0.1` 是可选项，部署脚本不做，步骤见 [deploy.md](deploy.md) §3.5，收不收口的
-差别见 [unified-subscription.md](unified-subscription.md) §6。本机未收口。
+差别见 [unified-subscription.md](unified-subscription.md) §6。是否已收口用
+[operations.md](operations.md) §3.1 的 `ss` 命令判断。
 
 443 已由 Xray Reality 占用，因此订阅入口默认用 `8443`，避免改动现有 Reality 入站或做复杂的
 SNI/fallback 分流。代价是 Clash 客户端会显示 `sub.example.com:8443`，那是从订阅 URL 解析出
@@ -89,7 +91,7 @@ SNI/fallback 分流。代价是 Clash 客户端会显示 `sub.example.com:8443`�
 
 订阅入口端口不是固定契约：`deploy.sh --port` 在部署时决定，写进 `sub-manager` 的 `PORT`
 常量、`rulesets.txt` 的规则地址和 `sub-rules-check`，三处由脚本一起替换。本文档其余位置
-写的 `8443` 都指这个端口；本机用的是默认值。
+写的 `8443` 都指这个端口，部署时换了端口就按实际值替换。
 
 ### 3.2 关键路径
 
@@ -114,7 +116,7 @@ SNI/fallback 分流。代价是 Clash 客户端会显示 `sub.example.com:8443`�
 /root/cert/sub.example.com/             # Let's Encrypt 证书（acme.sh webroot 续期）
 /root/.acme.sh/                         # acme.sh 本体、账户与续期配置（root crontab 每日调用）
 /var/www/acme/                          # ACME webroot（acme.sh 写入，Nginx 读取）
-/etc/hosts                              # 仅 2096 收口时：订阅域名 → 127.0.0.1（本机未收口，无此映射）
+/etc/hosts                              # 仅 2096 收口时：订阅域名 → 127.0.0.1
 /etc/x-ui/x-ui.db                       # 3x-ui 数据库
 ```
 
@@ -169,7 +171,8 @@ https://sub.example.com:8443/<48 位随机 hex>#DuskWander87
 
 `sub-manager list` 直接输出带 fragment 的完整地址，整条粘进客户端即可。
 
-客户端订阅卡片上显示的名称当前是 `DuskWander87`。服务器侧只有一个命名来源，客户端侧另有一处：
+客户端订阅卡片上显示的名称默认是 `DuskWander87`，部署时可用 `--profile-name` 改。服务器侧
+只有一个命名来源，客户端侧另有一处：
 
 | 取名方 | 名称来源 | 改哪里 |
 |---|---|---|
