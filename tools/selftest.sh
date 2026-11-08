@@ -1048,6 +1048,31 @@ t39() {
         eval '(( RC == 0 && const_hits == 1 && usage_hits == 1 && token_left == 0 && repo_hits == 2 ))'
 }
 
+# 2096 收口是可选项：未收口时域名指向公网地址是正常状态，不该告警；只有已收口而
+# 域名没指向回环时，Clash 分支才会「本地转换失败」。
+b_sub_listen() {
+    getent() { [[ -n ${STUB_RESOLVE:-} ]] && printf '%s %s\n' "$STUB_RESOLVE" "$2"; }
+    check_sub_listen
+}
+
+t40() {
+    local open_pub loop_pub loop_lo open_lo
+    local open='LISTEN 0 4096 *:2096 *:*' loop='LISTEN 0 4096 127.0.0.1:2096 0.0.0.0:*'
+    st_reset
+    STUB_SS_EXTRA=$open STUB_RESOLVE=203.0.113.10 run_deploy b_sub_listen
+    open_pub="rc=$RC $(oneline "$OUT")"
+    STUB_SS_EXTRA=$loop STUB_RESOLVE=203.0.113.10 run_deploy b_sub_listen
+    loop_pub="rc=$RC $(oneline "$OUT")"
+    STUB_SS_EXTRA=$loop STUB_RESOLVE=127.0.0.1 run_deploy b_sub_listen
+    loop_lo="rc=$RC $(oneline "$OUT")"
+    STUB_SS_EXTRA=$open STUB_RESOLVE=127.0.0.1 run_deploy b_sub_listen
+    open_lo="rc=$RC $(oneline "$OUT")"
+    st_check T40 "2096 预检：只在已收口且域名未指向回环时告警" \
+        "未收口+公网 无警告含「未收口」；收口+公网 警告「本地转换失败」；收口+回环 无警告；未收口+回环 无警告" \
+        "$open_pub | $loop_pub | $loop_lo | $open_lo" \
+        eval '[[ $open_pub == "rc=0 "*"未收口"* && $open_pub != *"警告"* && $loop_pub == "rc=0 "*"警告"*"本地转换失败"* && $loop_lo == "rc=0 "*"已收口"* && $loop_lo != *"警告"* && $open_lo == "rc=0 "* && $open_lo != *"警告"* ]]'
+}
+
 b_main_bad_port() {
     collect_missing_dependencies() { MISSING_COMMANDS=(nginx); MISSING_PACKAGES=(nginx); return 0; }
     install_dependencies() { printf 'INSTALLED=1\n'; }
@@ -1278,6 +1303,7 @@ main() {
     t37
     t38
     t39
+    t40
 
     printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
     (( FAILED == 0 ))

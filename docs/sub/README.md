@@ -114,7 +114,7 @@ SNI/fallback 分流。代价是 Clash 客户端会显示 `sub.example.com:8443`�
 /root/cert/sub.example.com/             # Let's Encrypt 证书（acme.sh webroot 续期）
 /root/.acme.sh/                         # acme.sh 本体、账户与续期配置（root crontab 每日调用）
 /var/www/acme/                          # ACME webroot（acme.sh 写入，Nginx 读取）
-/etc/hosts                              # 订阅域名 → 127.0.0.1，供 subconverter 拉取原始订阅
+/etc/hosts                              # 仅 2096 收口时：订阅域名 → 127.0.0.1（本机未收口，无此映射）
 /etc/x-ui/x-ui.db                       # 3x-ui 数据库
 ```
 

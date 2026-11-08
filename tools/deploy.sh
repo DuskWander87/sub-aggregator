@@ -631,25 +631,7 @@ preflight() {
         fi
     fi
 
-    local sub_listen="" entry bad=0
-    local -a entries=()
-    # dry-run 允许在缺依赖的机器上跑，ss 缺失时跳过端口检查而不是中断。
-    if have ss; then
-        sub_listen=$(ss -lnt 2>/dev/null | awk '$4 ~ /:2096$/ {print $4}' | paste -sd, -)
-    fi
-    if [[ -z $sub_listen ]]; then
-        warn "2096 未监听：3x-ui 订阅服务可能未启用，原生分支不可用。"
-    else
-        IFS=, read -r -a entries <<<"$sub_listen"
-        for entry in "${entries[@]}"; do
-            [[ $entry == "127.0.0.1:2096" || $entry == "[::1]:2096" ]] || bad=1
-        done
-        if [[ $bad -eq 0 ]]; then
-            log "2096：仅回环监听"
-        else
-            warn "2096 未收口到回环地址（当前 $sub_listen），见 deploy.md §3.5。"
-        fi
-    fi
+    check_sub_listen
 
     # 现有配置引用的证书缺失时，部署中途的 nginx -t 会失败。换域名时它引用的是旧
     # 域名的证书，按它实际引用的文件判断，而不是本次的 CERT_DIR。
@@ -697,22 +679,49 @@ preflight() {
     mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
     (( mem_mb >= 1800 )) || warn "内存只有 ${mem_mb} MB，建议至少 2 GB。"
 
-    local resolved
+    check_sub_port
+    # nginx 没装时依赖警告已经覆盖，这里只在已安装但未运行时提示。
+    if have nginx && ! systemctl is-active --quiet nginx.service; then
+        warn "nginx.service 未运行，部署时会启动。"
+    fi
+}
+
+# 2096 监听与订阅域名解析。收口（2096 只监听回环）是可选的，见 deploy.md §3.5：
+# 未收口时 subconverter 按域名经公网地址回源，不需要 /etc/hosts 映射；收口后域名
+# 必须解析到回环地址，否则 Clash 分支报「本地转换失败」。只有后一种情况告警。
+check_sub_listen() {
+    local sub_listen="" entry resolved loopback_only=0
+    local -a entries=()
+    # dry-run 允许在缺依赖的机器上跑，ss 缺失时跳过端口检查而不是中断。
+    if have ss; then
+        sub_listen=$(ss -lnt 2>/dev/null | awk '$4 ~ /:2096$/ {print $4}' | paste -sd, -)
+    fi
+    if [[ -z $sub_listen ]]; then
+        warn "2096 未监听：3x-ui 订阅服务可能未启用，原生分支不可用。"
+    else
+        loopback_only=1
+        IFS=, read -r -a entries <<<"$sub_listen"
+        for entry in "${entries[@]}"; do
+            [[ $entry == "127.0.0.1:2096" || $entry == "[::1]:2096" ]] || loopback_only=0
+        done
+        if (( loopback_only )); then
+            log "2096：仅回环监听（已收口）"
+        else
+            log "2096：$sub_listen（未收口；收口可选，见 deploy.md §3.5）"
+        fi
+    fi
+
     # getent 解析失败时返回 2，pipefail 会让赋值失败；这里要的是「空」而不是中断。
     resolved=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -n 1) || true
     if [[ -z $resolved ]]; then
         warn "域名 $DOMAIN 当前解析不到，确认 DNS 已生效。"
     elif [[ $resolved == 127.0.0.1 || $resolved == ::1 ]]; then
         log "域名解析：$resolved（本地回源）"
+    elif (( loopback_only )); then
+        log "域名解析：$resolved"
+        warn "2096 已收口，但域名 $DOMAIN 未指向 127.0.0.1：Clash 分支会报「本地转换失败」。在 /etc/hosts 加映射，见 deploy.md §3.5。"
     else
         log "域名解析：$resolved"
-        warn "域名未指向 127.0.0.1；Clash 分支依赖 /etc/hosts 回源，见 deploy.md §3.5。"
-    fi
-
-    check_sub_port
-    # nginx 没装时依赖警告已经覆盖，这里只在已安装但未运行时提示。
-    if have nginx && ! systemctl is-active --quiet nginx.service; then
-        warn "nginx.service 未运行，部署时会启动。"
     fi
 }
 
