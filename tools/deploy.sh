@@ -775,6 +775,18 @@ port_change_line() {
     printf '\n  端口变更:       %s → %s（所有设备需要重新配置订阅地址）' "$PORT_CHANGED_FROM" "$SUB_PORT"
 }
 
+# 计划和摘要里不加 --with-rules 时的规则发布说明。本机之前启用过本机发布时，本次既不
+# 停用定时器也不删发布目录，Nginx 仍读本地文件，不能写成反代 GitHub。判定与 sub-rules-check 相同。
+rules_skip_line() {
+    if [[ -d $PUBLISH_DIR ]] \
+            || systemctl is-enabled --quiet sub-rules-sync.timer 2>/dev/null \
+            || systemctl is-active --quiet sub-rules-sync.timer 2>/dev/null; then
+        printf '沿用本机已有的规则发布（未加 --with-rules，不停用 sub-rules-sync.timer，也不删 %s）' "$PUBLISH_DIR"
+    else
+        printf '本次不启用（Clash 分支仍含规则表，自维护列表由 Nginx 反代 GitHub 提供，客户端只连 %s）' "$SUB_PORT"
+    fi
+}
+
 print_plan() {
     local repo_display=$RULES_REPO cert_state dep_state="已就绪"
     if [[ $CERT_NEEDS_ISSUE -eq 1 ]]; then
@@ -822,7 +834,7 @@ print_plan() {
     $BACKUP_DIR
 
   规则发布:
-    $(if [[ $WITH_RULES -eq 1 ]]; then echo "启用 sub-rules-sync.timer（工作副本不存在时自动克隆 $RULES_REPO）"; else echo "本次不启用（Clash 分支仍含规则表，自维护列表由 Nginx 反代 GitHub 提供，客户端只连 $SUB_PORT）"; fi)
+    $(if [[ $WITH_RULES -eq 1 ]]; then echo "启用 sub-rules-sync.timer（工作副本不存在时自动克隆 $RULES_REPO）"; else rules_skip_line; fi)
 EOF
 }
 
@@ -838,7 +850,7 @@ print_summary() {
     if [[ $WITH_RULES -eq 1 ]]; then
         rules_state="启用 sub-rules-sync.timer（本机发布）"
     else
-        rules_state="本次不启用（Clash 分支仍含规则表，自维护列表由 Nginx 反代 GitHub 提供，客户端只连 $SUB_PORT）"
+        rules_state=$(rules_skip_line)
     fi
     cat <<EOF
 部署配置

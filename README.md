@@ -76,7 +76,7 @@ sub-manager test              # 检查全部订阅
 
 Shadowrocket、v2rayN 从订阅拿到的只有节点，分流由它们自己的配置决定。Clash 配置则引用 11 个规则集：9 个来自 [ACL4SSR](https://github.com/ACL4SSR/ACL4SSR)，客户端经 jsDelivr 拉取；另外 2 个是作者自维护的 [`ChinaDirect.list` 和 `Reject.list`](https://github.com/DuskWander87/shadowrocket-config/tree/main/rules)，由你的服务器在订阅端口上提供，客户端不用直连国内不可达的 raw.githubusercontent.com。
 
-默认部署时，这两个列表由服务器反代 GitHub 提供，受 GitHub 边缘缓存影响，push 后最长约 5.5 分钟才拉得到新版本。部署时（或之后重跑一次）加 `--with-rules`，服务器会克隆规则仓库、每分钟同步一次，push 后一分钟内就能拉到，GitHub 暂时访问不了也不影响：
+默认部署时，这两个列表由服务器反代 GitHub 提供，受 GitHub 边缘缓存影响，push 后要等几分钟才拉得到新版本（时效见 [design.md](docs/sub/design.md) §9.1）。部署时（或之后重跑一次）加 `--with-rules`，服务器会克隆规则仓库、每分钟同步一次，push 后一分钟内就能拉到，GitHub 暂时访问不了也不影响：
 
 ```bash
 tools/deploy.sh --with-rules

@@ -1025,6 +1025,35 @@ t34() {
         eval '(( RC != 0 )) && ! has "$OUT" "INSTALLED=1" && has "$OUT" "固定端口"'
 }
 
+# ---------- 规则发布摘要 ----------
+
+# 计划和摘要里「规则发布」那一行，各取一行。
+b_rules_lines() {
+    print_plan | sed -n '/^  规则发布:$/{n;s/^ *//;p;}'
+    print_summary | sed -n 's/^  规则发布: *//p'
+}
+
+t35() {
+    local fresh dir timer
+    st_reset
+    st_canned is-enabled sub-rules-sync.timer disabled
+    st_canned is-active sub-rules-sync.timer inactive
+    run_deploy b_rules_lines
+    fresh=$OUT
+    install -d -m 0755 "$ROOT/var/lib/sub-rules"
+    run_deploy b_rules_lines
+    dir=$OUT
+    st_reset
+    st_canned is-enabled sub-rules-sync.timer enabled
+    st_canned is-active sub-rules-sync.timer active
+    run_deploy b_rules_lines
+    timer=$OUT
+    st_check T35 "不加 --with-rules 重装：已有本机发布时，计划和摘要不说成反代 GitHub" \
+        "无发布：两行反代 GitHub | 有发布目录：两行沿用 | 定时器已启用：两行沿用" \
+        "$(oneline "$fresh") | $(oneline "$dir") | $(oneline "$timer")" \
+        eval '[[ $(grep -c "反代 GitHub" <<<"$fresh") == 2 && $(grep -c "^沿用" <<<"$dir") == 2 && $(grep -c "^沿用" <<<"$timer") == 2 ]] && lacks "$dir$timer" "反代 GitHub"'
+}
+
 # ---------- 入口 ----------
 
 main() {
@@ -1074,6 +1103,7 @@ main() {
     t32
     t33
     t34
+    t35
 
     printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
     (( FAILED == 0 ))

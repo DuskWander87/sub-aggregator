@@ -50,14 +50,14 @@ VLESS Reality 故障排查全过程，全文使用占位符，可公开分享。
 
 ```text
 默认部署
-  GitHub -> Nginx :8443 反代（本机缓存 30 秒）-> Mihomo rule-provider
+  GitHub -> Nginx :8443 反代（带本机缓存）-> Mihomo rule-provider
 
 --with-rules
   git push -> sub-rules-sync.timer（每分钟）-> /var/lib/sub-rules/
     -> Nginx :8443 直接 serve -> Mihomo rule-provider（发布目录缺文件时回落到 GitHub 反代）
 ```
 
-本机是默认部署，没有启用 `--with-rules`。两种模式的差异见 [design.md](design.md) §9.1，
+本机是默认部署，没有启用 `--with-rules`。两种模式的差异和时效见 [design.md](design.md) §9.1，
 自维护规则为什么由本站提供见 §9.4；日常更新见 [operations.md](operations.md) §2。
 
 ## 3. 速查

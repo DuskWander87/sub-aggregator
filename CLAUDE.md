@@ -209,10 +209,10 @@ nginx -t
 - **`nginx -t` 会 chown 缓存目录**：隔离校验配置里不能 include 生产的
   `sub-rules-cache.conf`，否则 `/var/cache/nginx/sub-rules` 属主被夺，规则端点返回 500。
   incidents `2026-08-10 nginx -t 夺走缓存目录属主`
-- **自维护规则集不走 jsdelivr**：两个 list 由本站 8443 提供。默认部署反代 GitHub，push 后最长
-  约 5.5 分钟生效；`--with-rules` 时由 `sub-rules-sync.timer` 每分钟发布到 `/var/lib/sub-rules/`，
-  nginx 直接 serve。jsdelivr 的两层缓存不同步，重复 purge 会让内容在新旧间跳变。incidents
-  `2026-08-10 jsdelivr 缓存不收敛`，两种模式的对比见 design §9.1
+- **自维护规则集不走 jsdelivr**：两个 list 由本站 8443 提供。默认部署反代 GitHub；`--with-rules`
+  时由 `sub-rules-sync.timer` 每分钟发布到 `/var/lib/sub-rules/`，nginx 直接 serve。两种模式的
+  时效对比见 design §9.1。jsdelivr 的两层缓存不同步，重复 purge 会让内容在新旧间跳变。incidents
+  `2026-08-10 jsdelivr 缓存不收敛`
 - **GitHub 反代缓存的两条硬约束**：默认部署下每个规则请求都经过它。必须写
   `proxy_ignore_headers Cache-Control Expires`；禁止 `proxy_cache_background_update on` 和
   `use_stale ... updating`。incidents `2026-08-19`

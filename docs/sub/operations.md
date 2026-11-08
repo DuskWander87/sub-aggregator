@@ -255,15 +255,16 @@ sub-manager renumber 101
 
 ```text
 默认部署
-  git push → GitHub（边缘缓存 300 秒）→ Nginx 反代（缓存 30 秒）→ Clash 客户端点「更新规则集」
+  git push → GitHub（边缘缓存）→ Nginx 反代（本机缓存）→ Clash 客户端点「更新规则集」
 
 --with-rules
   git push → sub-rules-sync.timer（每分钟）→ /var/lib/sub-rules/ → Clash 客户端点「更新规则集」
 ```
 
-默认部署的延迟上限约 5.5 分钟，期间单次拉取可能拿到旧版。服务器侧没有办法加速：GitHub 边缘
-缓存绕不过去，见 [incidents.md](incidents.md) `2026-08-19 「更新规则集」拿到的永远是上一版`。
-需要更快就启用 `--with-rules`。
+默认部署要等 GitHub 边缘缓存和本机缓存都过期才拉得到新版本，延迟上限见 [design.md](design.md)
+§9.1，期间单次拉取可能拿到旧版。服务器侧没有办法加速：GitHub 边缘缓存绕不过去，见
+[incidents.md](incidents.md) `2026-08-19 「更新规则集」拿到的永远是上一版`。需要更快就启用
+`--with-rules`。
 
 启用 `--with-rules` 后，延迟上限 = 定时器周期 = **1 分钟**。想跳过这 1 分钟，可在服务器手工跑
 一次 `sub-rules-sync`（幂等，随时可执行）。
@@ -284,7 +285,7 @@ sub-rules-sync -v    # 仅 --with-rules：手工同步一次，打印结果
 
 `sub-rules-check` 按部署方式选检查项：发布目录存在或定时器已启用，按 `--with-rules` 检查，
 否则按默认部署检查。默认部署核对两个端点返回 `200`、`X-Rule-Source: github`、含规则行，且
-内容与 GitHub 当前版本一致，push 后约 5.5 分钟内报不一致属正常。`--with-rules` 核对端点 =
+内容与 GitHub 当前版本一致；push 后、缓存过期之前报不一致属正常。`--with-rules` 核对端点 =
 发布目录 = git 工作副本 = origin/main，并报同步器健康度。
 
 同步脚本用 `fetch` + `merge --ff-only`：`/root/code/shadowrocket-config` 是可能被直接编辑的
