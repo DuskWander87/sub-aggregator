@@ -22,7 +22,7 @@ sub-aggregator 装在 3x-ui 所在的服务器上，把转换收回本机。一�
 
 ### 1. 准备
 
-- 一台 Ubuntu 24.04 服务器，装好了 3x-ui，443 上有一个能用的 VLESS Reality 入站。需要 root 权限和至少 2 GB 内存，不需要 Docker。
+- 一台 Ubuntu 24.04 服务器，装好了 3x-ui，443 上有一个能用的 VLESS Reality 入站。需要 root 权限和至少 2 GB 内存，不需要 Docker。还没有 3x-ui 底座，可以先看 [自建节点教程 3XUI 面板（无限芝士）](https://www.youtube.com/watch?v=TRVE7sVTgWw)。
 - 一个解析到这台服务器的域名。没有证书时脚本会用 Let's Encrypt 签发，要求公网能访问 80 端口。
 - 一个空闲端口留给订阅入口，默认 `8443`（443 已被 Reality 占用），并在防火墙 / 云安全组放行 TCP 入站。
 

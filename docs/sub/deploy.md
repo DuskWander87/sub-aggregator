@@ -29,8 +29,6 @@ acme.sh 的安装记录依次查找；都没有时用 acme.sh 通过 Nginx webro
 不全且希望直接报错、而不是自动签发时加 `--no-issue-cert`。签发源、证书给谁用、续期怎么跑，
 见 [certificates.md](certificates.md)。
 
-还没有 3x-ui 底座，可以先看 [自建节点教程 3XUI 面板（无限芝士）](https://www.youtube.com/watch?v=TRVE7sVTgWw)。
-
 ## 2. 用部署脚本
 
 部署只有一个入口：`tools/deploy.sh`，不需要其他工具或中间层。
