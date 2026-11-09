@@ -1124,16 +1124,21 @@ xui_uses_cert_dir() {
 }
 
 # 续期 hook 必须包含 reload nginx；面板/原生订阅也用这张证书时还要重启 x-ui。
-# 两者都保留原有的 hook（3x-ui 自签的配置里通常已有 systemctl restart x-ui）。
+# 两者都保留原有的 hook（3x-ui 自签的配置里通常已有 x-ui restart）；开头补的重启与
+# 后面已有的重启重复时只保留一条。
 acme_reload_cmd() {
-    local conf cmd=""
+    local conf cmd="" prefix="systemctl restart x-ui || rc-service x-ui restart" rest
     if conf=$(acme_conf_file "$DOMAIN"); then
         cmd=$(sed -n "s/^Le_ReloadCmd='\(.*\)'$/\1/p" "$conf" | head -n 1)
         cmd=$(decode_acme_value "$cmd")
     fi
+    rest=${cmd#"$prefix; "}
+    if [[ $rest != "$cmd" && ( $rest == *"restart x-ui"* || $rest == *"x-ui restart"* ) ]]; then
+        cmd=$rest
+    fi
     if xui_uses_cert_dir; then
-        [[ $cmd == *"restart x-ui"* ]] \
-            || cmd="systemctl restart x-ui || rc-service x-ui restart${cmd:+; $cmd}"
+        [[ $cmd == *"restart x-ui"* || $cmd == *"x-ui restart"* ]] \
+            || cmd="$prefix${cmd:+; $cmd}"
     fi
     [[ $cmd == *"reload nginx"* ]] || cmd="${cmd:+$cmd; }systemctl reload nginx"
     printf '%s\n' "$cmd"

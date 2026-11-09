@@ -679,6 +679,23 @@ t41() {
         eval '[[ $valid == "rc=0 "*"NEED=0 DIR=$CERT" && $expired == "rc=0 "*"已过期"*"NEED=1 DIR=$CERT" && $noissue != "rc=0 "* && $noissue == *"已过期"* && $certbot != "rc=0 "* && $certbot == *"certbot renew"* && $renewed == "rc=0 valid" && $wr == "$WEBROOT" ]]'
 }
 
+t42() {
+    local prefix="systemctl restart x-ui || rc-service x-ui restart" orig got="" want
+    want="x-ui restart; systemctl reload nginx | x-ui restart; systemctl reload nginx | $prefix; systemctl reload nginx | "
+    for orig in "x-ui restart" "$prefix; x-ui restart; systemctl reload nginx" "$prefix; systemctl reload nginx"; do
+        st_reset
+        seed_acme le "$WEBROOT"
+        conf_set "$(acme_conf)" Le_ReloadCmd "$(b64_hook "$orig")"
+        conf_set "$(acme_conf)" Le_RealFullChainPath "$CERT/fullchain.pem"
+        conf_set "$(acme_conf)" Le_RealKeyPath "$CERT/privkey.pem"
+        printf '%s\n' "$CERT/fullchain.pem" >"$XUI_DIR/webCertFile"
+        run_deploy b_normalize
+        got+="$(decoded_hook "$(acme_conf)") | "
+    done
+    st_check T42 "续期 hook 认出 x-ui restart，重复的 x-ui 重启收敛为一次" "$want" "$got" \
+        test "$got" = "$want"
+}
+
 # ---------- Phase 2：回滚、恢复与中断 ----------
 
 st_canned() {
@@ -1354,6 +1371,7 @@ main() {
     t39
     t40
     t41
+    t42
 
     printf '%d passed, %d failed\n' "$PASSED" "$FAILED"
     (( FAILED == 0 ))

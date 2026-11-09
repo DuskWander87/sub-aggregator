@@ -77,15 +77,20 @@ acme.sh 安装时会在 root 的 crontab 里加一条任务，每天运行一次
 `--cron` 每次都只做检查，只有剩余有效期进入续期窗口（约 30 天）才真正签发。续期成功后执行
 acme.sh conf 里保存的 reload hook。`deploy.sh` 按下面的规则组成它：
 
-1. 保留原有命令（3x-ui 自己签发过的配置里通常已有 `systemctl restart x-ui`）；
+1. 保留原有命令（3x-ui 自己签发过的配置里通常已有 `x-ui restart`）；
 2. 补上 `systemctl reload nginx`；
-3. 面板或原生订阅的证书指向本证书目录、或读不到面板设置时，再补上
-   `systemctl restart x-ui || rc-service x-ui restart`。
+3. 面板或原生订阅的证书指向本证书目录、或读不到面板设置时，原有命令里没有 x-ui 重启
+   （`x-ui restart` 或 `systemctl restart x-ui` 都算）才补上
+   `systemctl restart x-ui || rc-service x-ui restart`；
+4. 原有命令以第 3 条的那条重启开头、后面另有 x-ui 重启时，去掉开头那条，x-ui 只重启一次。
 
 典型结果：
 
 ```text
+# 证书由 deploy.sh 新签发，面板或原生订阅也用这张证书
 systemctl restart x-ui || rc-service x-ui restart; systemctl reload nginx
+# 证书由 3x-ui 签发过（原有命令是 x-ui restart）
+x-ui restart; systemctl reload nginx
 ```
 
 两部分都必要：面板/原生订阅由 x-ui 进程持有证书，聚合入口由 Nginx 持有。缺了 reload，文件换新
