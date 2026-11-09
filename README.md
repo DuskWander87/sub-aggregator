@@ -36,7 +36,7 @@ tools/deploy.sh               # 加 --dry-run 只看计划，不改任何文件
 
 脚本会自己推导域名、找证书，没有证书就签发一张，之后由 acme.sh 自动续期。缺依赖时先问你要不要装，打印部署摘要后再确认一次才动手，覆盖文件前都会先备份。
 
-`8443` 被占用时加 `--port <端口>` 换一个。端口会写进每条订阅地址，装好后再改，所有设备都要重新导入。
+`8443` 被占用时加 `--port <端口>` 换一个。端口会写进每条订阅地址，部署后再改端口，所有设备都要重新导入订阅。
 
 装好后建议再手工做一步：把 3x-ui 的订阅服务（默认 2096 端口）改成只监听本机，原始订阅地址在公网上就访问不到了。部署脚本不碰 3x-ui，步骤见 [deploy.md](docs/sub/deploy.md) §3.5。全部参数、手动部署和回滚也在这份文档里。
 
@@ -57,7 +57,7 @@ https://<域名>:8443/<48 位随机 hex>#<订阅名>
 
 整条复制到客户端里添加订阅，Clash 和 Shadowrocket 用的是同一条。末尾的 `#<订阅名>` 是给客户端看的显示名（Shadowrocket 只认它），不会发到服务器。
 
-服务器按 `User-Agent` 判断要不要返回 Clash 配置：UA 含 `clash`、`mihomo`、`verge` 等关键词的才返回，其余一律返回原生订阅。如果你的 Clash 客户端 UA 不含这些关键词，拿到的就是原生订阅，这时在 `#` 前加 `?t=clash` 强制返回 Clash 配置，比如 `https://<域名>:8443/<随机路径>?t=clash#<订阅名>`；反过来，`?t=raw` 强制返回原生订阅。`t` 写错的值不会退回 UA 判断，一律返回原生订阅。完整规则见 [docs/sub/unified-subscription.md](docs/sub/unified-subscription.md) §2。
+服务器按 `User-Agent` 判断要不要返回 Clash 配置：UA 含 `clash`、`mihomo`、`verge` 等关键词的才返回，其余一律返回原生订阅。如果你的 Clash 客户端 UA 不含这些关键词，拿到的就是原生订阅，这时在 `#` 前加 `?t=clash` 强制返回 Clash 配置，比如 `https://<域名>:8443/<随机路径>?t=clash#<订阅名>`；反过来，`?t=raw` 强制返回原生订阅。`t` 取其他值（比如拼错）时不会退回 UA 判断，一律返回原生订阅。完整规则见 [docs/sub/unified-subscription.md](docs/sub/unified-subscription.md) §2。
 
 ## 日常操作
 
@@ -70,7 +70,7 @@ sub-manager remove sub-1      # 删除订阅
 sub-manager test              # 检查全部订阅
 ```
 
-面板里增删客户端不会自动同步过来。加了人要再跑一次 `add --from-xui`；删了人，`list` 会标出哪些订阅已经没有对应的客户端。每条命令的细节见 [operations.md](docs/sub/operations.md)。
+面板里增删客户端不会自动同步过来。新增客户端后，再跑一次 `add --from-xui` 给它建订阅；删除客户端后，`list` 会标出哪些订阅已经没有对应的客户端。每条命令的细节见 [operations.md](docs/sub/operations.md)。
 
 ## 规则集只对 Clash 生效
 
