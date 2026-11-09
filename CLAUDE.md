@@ -26,7 +26,7 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 | `docs/sub/operations.md` | 管理脚本、编号与轮换、检查与验证、备份范围 | 要动手做某件事 | 保持精简 |
 | `docs/sub/unified-subscription.md` | 订阅入口：UA 分流规则、两个分支的输出、2096 收口 | 给设备配订阅、要改分流规则 | §2 判定规则是**单一事实源** |
 | `docs/sub/design.md` | 环境、选型、配置、安全模型、策略组 / DNS / 规则分发设计 | 要改系统，需先知道为什么是现在这样 | 改服务器必须同步改 |
-| `docs/sub/incidents.md` | 踩过的坑，按日期倒序 | 「这个症状以前见过吗」 | 只追加，不改旧条目 |
+| `docs/sub/incidents.md` | 历次故障记录，按日期倒序 | 「这个症状以前见过吗」 | 只追加，不改旧条目 |
 | `docs/3x-ui/troubleshooting.md` | 一次真实的 3x-ui / VLESS Reality 故障排查全过程 | 节点不通时 | 归档案例，一般不再改动 |
 
 **不要把同一个事实写进两份文档。** 端口、路径、转换参数只在 `sub/README.md` §3 定义，
@@ -36,7 +36,7 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 **只写现状，不写沿革。** 两份归档文档（`incidents.md`、`3x-ui/troubleshooting.md`）之外，
 所有文档只描述系统**现在**是什么样：不写「在此之前」「原本」「已于 X 退役」「旧结论 /
 现结论」，标题不带日期戳，不保留已删除命令和已弃用组件的安装细节。要解释「为什么是现在
-这样」，用现在时直接给理由，不要叙述改动过程。规则本身的来历可以写——它是规则的证据；
+这样」，用现在时直接给理由，不要叙述改动过程。规则本身的来历可以写，它是规则的证据；
 系统的旧状态不写。
 
 历史只有一个去处：`docs/sub/incidents.md`，按日期倒序追加。其余文档需要「为什么」时引用
@@ -50,7 +50,7 @@ sub-aggregator 的文档按**阅读时机**而非章节顺序组织：
 - **troubleshooting** 全文使用占位符（`panel.example.com`、`203.0.113.10`、
   `/RANDOM_PANEL_PATH/`），可以公开分享。
 - **sub/** 用 `sub.example.com` 代表真实订阅域名，端口是真实值；随机订阅路径、UUID、
-  `subId`、原始订阅 URL、节点后缀一律写作 `<随机路径>` 之类的占位符。**继续保持这一点**——
+  `subId`、原始订阅 URL、节点后缀一律写作 `<随机路径>` 之类的占位符。**继续保持这一点**：
   往文档里粘贴真实随机路径等于泄露凭据。
 
 ## 系统实际位置
@@ -117,22 +117,22 @@ hex → `<RULES_PREFIX>`、证书路径 → `/root/cert/sub.example.com/`。
 ```bash
 tools/deploy.sh                 # 一条命令部署（仓库工具，不装到真机）
 tools/deploy.sh --dry-run       # 只预览，不改任何文件
-tools/uninstall.sh              # 卸载聚合层；先打印计划再确认，不碰 3x-ui、证书与 Nginx
-tools/selftest.sh               # 沙箱回归：桩替代 acme.sh/systemctl/nginx，不碰真机
+tools/uninstall.sh              # 卸载聚合层；先打印计划再确认，不改动 3x-ui、证书与 Nginx
+tools/selftest.sh               # 沙箱回归：桩替代 acme.sh/systemctl/nginx，不改动真机
 ```
 
 订阅管理一律走脚本，不要手工编辑它生成的 Nginx 配置：
 
 ```bash
 sub-manager list                # 查看（脱敏显示，带客户端名与漂移报告）
-sub-manager add --from-xui      # 从 3x-ui 客户端列表里挑一个建订阅，地址由 subId 推导
+sub-manager add --from-xui      # 从 3x-ui 客户端列表里选一个建订阅，地址由 subId 推导
 sub-manager add                 # 新增，隐藏输入原始订阅（源不在本机 3x-ui 时用）
 sub-manager update sub-1        # 原始订阅 subId 变更后同步，地址不变
 sub-manager rotate sub-1        # 换随机路径（--all 换全部），编号与原始订阅不变
 sub-manager remove sub-1        # 撤销；编号只增不复用，删除留下空号
 sub-manager renumber 101        # 重排编号，订阅地址与设备配置不变
 sub-manager resync              # 改了模板/转换参数后重建配置
-sub-manager test                # 端到端验证全部订阅（四发 UA 断言）
+sub-manager test                # 端到端验证全部订阅（四项 UA 断言）
 sub-rules-check                     # 规则端点诊断，按部署方式选检查项；--with-rules 时还查同步器
 sub-rules-sync                      # --with-rules 时手工同步一次（push 后想跳过 1 分钟等待时用）
 ```
@@ -184,12 +184,12 @@ nginx -t
   fragment `#<订阅名>`，那是客户端本地行为。改 `PROFILE_NAME` 后 `resync` 即可，名字保持纯
   ASCII。默认值见 README §3.4。incidents `2026-08-22`
 - **改路径 = 所有设备重配**：只有 `rotate` 会换路径，它保留编号与原始订阅，不必重输 URL；
-  `resync` 只重建 Nginx 配置，编号和地址都不动。改域名同样需要所有设备重配，`deploy.sh` 会在
+  `resync` 只重建 Nginx 配置，编号和地址都不变。改域名同样需要所有设备重配，`deploy.sh` 会在
   摘要里标出域名变更。
-- **`renumber` 只改编号**：`path`、源订阅和节点都不动，设备无需重配；但记住的旧编号会失效，
+- **`renumber` 只改编号**：`path`、源订阅和节点都不变，设备无需重配；但记住的旧编号会失效，
   之后的 `update` / `rotate` / `remove` 要用新编号。
 - **`rotate` / `remove` ≠ 收回节点访问**：`sub-manager` 对 x-ui / `*.db` 零写操作，它们只
-  作废分发通道，已拉取 profile 里的 UUID 仍然有效。真正踢人要去 3x-ui 删掉该客户端或更换
+  作废分发通道，已拉取 profile 里的 UUID 仍然有效。真正收回访问要在 3x-ui 删掉该客户端或更换
   UUID；2096 未收口时还要重置 `subId`，因为原生分支透传的 `Profile-Web-Page-Url`
   会带出它。见 unified-subscription §6。
 - **2096 收口是可选项**：收口后订阅域名必须解析到 `127.0.0.1`，否则 Clash 分支报
@@ -209,7 +209,7 @@ nginx -t
 - **读 `x-ui.db` 要区分「空」与「失败」**：库是 `journal_mode=delete`，写事务会阻塞读，坏读
   返回空结果；所有查询带 `-cmd '.timeout 3000'`，并同时检查退出码和结果非空。把空当成
   「没有客户端」会得到「无漂移」的错误结论。incidents `2026-08-22 读 x-ui.db 偶发返回空`
-- **两个分支都要带 `Vary: User-Agent`**：否则缓存会把 Clash 配置喂给 Shadowrocket。承接
+- **两个分支都要带 `Vary: User-Agent`**：否则缓存会把 Clash 配置返回给 Shadowrocket。承接
   分流的 location 必须是精确匹配 + `internal`，不能用命名 location。见
   unified-subscription §3、§5
 - **恢复必须回到原状态**：卸载的 restore 按记录还原单元启用状态；部署回滚不从快照恢复
@@ -239,7 +239,7 @@ nginx -t
 ## 约定
 
 - 文档语言为中文。除 `incidents` 外，其余文档章节按数字编号；`incidents` 用日期做标题，如
-  `## 2026-08-19 「更新规则集」拿到的永远是上一版`——追加时不必重排编号，跨文档引用也不会
+  `## 2026-08-19 「更新规则集」拿到的永远是上一版`。这样追加时不必重排编号，跨文档引用也不会
   因插入新条目而失效。
 - 新故障写进 `docs/sub/incidents.md` 顶部（倒序），保留完整链路：现象 → 排查 → 被排除的
   方向 → 根因 → 解决方案 → 验证。「排除了什么」和「根因是什么」同样有价值。旧条目只读，

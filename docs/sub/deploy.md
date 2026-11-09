@@ -15,7 +15,7 @@
   [README.md](README.md) §3.1）。端口写进每条订阅地址，部署后再改需要所有设备重新配置。
 - 依赖命令：`curl`、`jq`、`sqlite3`、`openssl`、`flock`、Nginx、systemd 等（`--with-rules` 时
   还有 `git`）。脚本一次性检查，缺失时列出命令和对应 apt 包，确认后执行 `apt-get update`
-  和 `apt-get install -y`；正式部署时非交互且没加 `--yes`，打印可以直接复制的命令。
+  和 `apt-get install -y`；正式部署时非交互且未加 `--yes`，打印可以直接复制的命令。
   `--dry-run` 只报告缺失项，不安装。
 - 至少 2 GB 内存。
 
@@ -26,7 +26,7 @@ Reality SNI 是目标站域名，不会被采用；推导结果不对时用 `--d
 证书不需要预先准备：脚本按 `/root/cert/<域名>/`、`/etc/letsencrypt/live/<域名>/`、
 acme.sh 的安装记录依次查找；都没有时用 acme.sh 通过 Nginx webroot 自动签发到
 `/root/cert/<域名>/`。想用自己的证书时把 `fullchain.pem` 和 `privkey.pem` 放进该目录；文件
-不全且希望直接报错、而不是自动签发时加 `--no-issue-cert`。签发源、证书给谁用、续期怎么跑，
+不全且希望直接报错、而不是自动签发时加 `--no-issue-cert`。签发源、证书给谁用、续期如何运行，
 见 [certificates.md](certificates.md)。
 
 ## 2. 用部署脚本
@@ -62,14 +62,14 @@ tools/deploy.sh
    然后按 [certificates.md](certificates.md) §2.2 对齐续期方式和 hook。部署过程中只 reload
    Nginx、不重启 x-ui；面板或原生订阅也用这张证书时，结束时提示手工重启 x-ui。
 8. 如果加了 `--with-rules`，启用本机规则发布：规则仓库默认是作者的，工作副本不存在时
-   自动克隆，然后建发布目录、启用同步定时器并跑一次 `sub-rules-check`。不加时，同步脚本和
-   定时器单元照样装上，但不克隆仓库、不建发布目录、不启用定时器：Clash 分支照样包含规则表，
+   自动克隆，然后建发布目录、启用同步定时器并运行一次 `sub-rules-check`。不加时，同步脚本和
+   定时器单元仍会安装，但不克隆仓库、不建发布目录、不启用定时器：Clash 分支仍包含规则表，
    两个自维护列表由 Nginx 反代 GitHub 提供，客户端只连本站订阅端口。本机之前启用过本机发布
    时，不加这个参数重装也不停用定时器、不删发布目录，本机发布保持原样，摘要里会注明。两种
    模式的差异见 [design.md](design.md) §9.1。
 9. 验证 x-ui / subconverter / nginx 状态、转换后端响应和 `nginx -t`，有订阅时检查订阅端口，
    打印 3x-ui 面板地址
-   和建订阅的后续步骤。验证不通过时给出警告、以非 0 退出，并明确说明哪一项没过；已安装的
+   和建订阅的后续步骤。验证不通过时给出警告、以非 0 退出，并明确说明哪一项未通过；已安装的
    文件保留。
 
 部署不创建订阅。订阅的前提是面板里已经有节点和客户端，这一步只能在面板里完成；脚本只
@@ -116,7 +116,7 @@ tools/deploy.sh --domain sub.example.com --with-rules --yes
 
 重装时，脚本会从已安装的 `sub-manager`、`sub-rules.conf` 和 `sub-rules-sync` 里读取域名、
 证书目录、订阅端口、显示名、规则前缀、规则仓库和工作副本，作为默认值；命令行参数优先。这样不会因为
-重跑一次脚本就静默换掉规则端点。
+重新运行一次脚本就静默换掉规则端点。
 
 ### 2.4 证书与续期
 
@@ -146,7 +146,7 @@ acme.sh 未安装时脚本从 `https://get.acme.sh` 安装。
 
 签发源、已有证书的复用与重签见 [certificates.md](certificates.md) §2.1；续期 hook 的组成、
 续期方式对齐规则和 certbot 的处理见 §2.2。`--no-issue-cert` 只关掉自动签发：缺文件直接报错，
-已有证书照常使用，续期方式照样对齐。
+已有证书照常使用，续期方式仍会对齐。
 
 ## 3. 手动部署
 
@@ -173,7 +173,7 @@ grep -rn 'sub.example.com\|<RULES_PREFIX>\|DuskWander\|shadowrocket-config' serv
 前 3 行必须换成你自己的值。端口默认 `8443`，被占用时三处一起换成同一个空闲端口。后 3 行
 按你的显示名和规则仓库调整。订阅名保持纯 ASCII，两个
 服务器侧分支由同一个常量派生，细节见 [README.md](README.md) §3.4。改完 `sub-manager` 里的常量后，把脚本重新装到
-`/usr/local/sbin/`，再跑 `sub-manager resync`。
+`/usr/local/sbin/`，再执行 `sub-manager resync`。
 
 ### 3.2 放置文件
 
@@ -389,17 +389,17 @@ tools/uninstall.sh
 
 卸载会停掉残留的 subconverter 进程：即使单元文件已经不在，也先执行 `systemctl stop`。
 
-卸载不会收回节点访问：已拉取的 profile 里 UUID 仍然有效，真正踢人要去 3x-ui 删除或更换该
-客户端的 UUID，见 [unified-subscription.md](unified-subscription.md) §6。
+卸载不会收回节点访问：已拉取的 profile 里 UUID 仍然有效，真正收回访问要在 3x-ui 删除该客户端
+或更换它的 UUID，见 [unified-subscription.md](unified-subscription.md) §6。
 
 ## 7. 常见问题
 
-- **订阅端口被别的进程占用**：脚本在改动配置前失败（此时缺失的依赖已经装上）。`ss -lntp | grep ':8443 '` 确认占用者，
-  然后加 `--port <空闲端口>` 重跑，并在防火墙 / 云安全组放行新端口。端口上已有其他站点的
+- **订阅端口被别的进程占用**：脚本在改动配置前失败（此时缺失的依赖已经安装）。`ss -lntp | grep ':8443 '` 确认占用者，
+  然后加 `--port <空闲端口>` 重新运行，并在防火墙 / 云安全组放行新端口。端口上已有其他站点的
   Nginx 时脚本只警告并共用；那个站点若不是 TLS，会被订阅入口的 `ssl` 监听影响，同样换端口。
 - **改端口**：`--port <新端口>` 重装时，所有设备的订阅地址都要换成新端口重新配置；脚本在
   摘要里标出端口变更，并重建订阅入口和规则地址。防火墙记得放行新端口。
-- **装好依赖后取消部署**：脚本装上的 nginx 已经启动并占用 80 端口，本机证书若用 acme.sh 或
+- **安装依赖后取消部署**：脚本安装的 nginx 已经启动并占用 80 端口，本机证书若用 acme.sh 或
   certbot 的 standalone 方式续期，续期会失败；脚本退出时会提示。重新运行 `deploy.sh` 完成
   部署（会把续期方式对齐为 webroot），或执行 `systemctl disable --now nginx`。
 - **证书签发失败**：确认域名的 A/AAAA 记录指向本机、公网 80 端口可达（安全组 / 防火墙），
@@ -409,7 +409,7 @@ tools/uninstall.sh
   [certificates.md](certificates.md) §2.1。
 - **续期失败**：`/root/.acme.sh/acme.sh --list` 看下次续期时间；确认
   `/etc/nginx/conf.d/acme-challenge.conf` 生效（`nginx -T | grep -A5 acme-challenge`），且
-  Nginx worker 能读 `/var/www/acme`。续期方式不是 webroot 时重跑部署脚本，按
+  Nginx worker 能读 `/var/www/acme`。续期方式不是 webroot 时重新运行部署脚本，按
   [certificates.md](certificates.md) §2.2 对齐。
 - **改域名**：`--domain <新域名>` 重装时，所有设备的订阅地址都要换成新域名重新配置；脚本在
   摘要里标出域名变更，并为新域名找证书或签发。`acme-challenge.conf` 只为新域名提供挑战路径，
@@ -426,5 +426,5 @@ tools/uninstall.sh
 - **规则端点 404**：先确认已经至少创建一条订阅，`sub-manager` 生成的 server 块才会包含
   `sub-rules.conf`。默认部署再确认 `--rules-repo` 指向的仓库存在，且 `main` 分支的 `rules/`
   下有这两个文件，端点会原样转发 GitHub 的 404；启用了 `--with-rules` 则查发布目录和定时器。
-  两种情况都可以先跑 `sub-rules-check`：默认部署下端点失败时，它会再去 GitHub 取一次原文，
+  两种情况都可以先运行 `sub-rules-check`：默认部署下端点失败时，它会再去 GitHub 取一次原文，
   分清问题出在本站还是上游。

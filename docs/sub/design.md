@@ -181,7 +181,7 @@ curl http://127.0.0.1:25500/version
 
 关键设计：
 
-- 监听 `8443`，不碰 Xray 的 `443`。
+- 监听 `8443`，不占用 Xray 的 `443`。
 - 使用已有的 `sub.example.com` 证书。
 - 仅启用 TLS 1.2 和 TLS 1.3。
 - 使用 `location =` 精确匹配私有路径。
@@ -545,7 +545,7 @@ rules:
 | | 默认部署 | `--with-rules` |
 |---|---|---|
 | 端点读什么 | 反代 `raw.githubusercontent.com`，本机缓存 30 秒（`X-Rule-Source: github`） | 本机发布目录 `/var/lib/sub-rules/`，无缓存层（`X-Rule-Source: local`）；缺文件时才回落到反代 |
-| push 后多久拉得到 | 最长约 5.5 分钟：GitHub 边缘缓存 `max-age=300`，加本机 30 秒；期间单次拉取可能拿到旧版 | 最长 1 分钟（同步周期），单次拉取即当前内容 |
+| push 后多久能拉取到 | 最长约 5.5 分钟：GitHub 边缘缓存 `max-age=300`，加本机 30 秒；期间单次拉取可能拿到旧版 | 最长 1 分钟（同步周期），单次拉取即当前内容 |
 | GitHub 不可达时 | 返回本机缓存的最后一份（`inactive=30d`），从没缓存过就拉取失败 | 不受影响，同步失败也照常 serve 发布目录 |
 | 服务器上多出 | 无 | 规则仓库工作副本、发布目录，启用中的 `sub-rules-sync.timer` |
 
@@ -584,7 +584,7 @@ ACL4SSR 保持 jsdelivr：上游按天更新，不存在「改完想立刻生效
 两种模式用同一份 Nginx 配置：每个 location 先 `try_files` 发布目录里的同名文件，找不到才落到
 `@sub_rules_*` 反代 GitHub。默认部署没有发布目录，所以每次请求都走反代。
 
-以下只涉及 `--with-rules`。`/root` 是 0700，www-data 穿不进去，所以 clone 目录不能直接给 nginx
+以下只涉及 `--with-rules`。`/root` 是 0700，www-data 无法进入，所以 clone 目录不能直接给 nginx
 serve，必须由同步脚本发布到 `/var/lib/sub-rules/`。
 
 同步脚本的三条保守设计：
@@ -592,7 +592,7 @@ serve，必须由同步脚本发布到 `/var/lib/sub-rules/`。
 - 拉取用 `fetch` + `merge --ff-only`：工作副本有本地提交或未提交改动时**拒绝合并**而不是
   `reset --hard` 销毁。`/root/code/shadowrocket-config` 是可能被直接编辑的工作副本，不是只读
   镜像。此时 `sub-rules-check` 会报「同步已停滞」。
-- 网络失败不致命：仍按工作副本内容发布，端点不会因 GitHub 抽风而降级。
+- 网络失败不致命：仍按工作副本内容发布，端点不会因 GitHub 暂时故障而降级。
 - 先全部校验（非空 + 至少一条规则行）再全部发布，且经由临时文件 `mv`，避免发布出半套规则或
   被 nginx 读到写了一半的文件。
 
@@ -604,7 +604,7 @@ serve，必须由同步脚本发布到 `/var/lib/sub-rules/`。
 加载失败会让 Mihomo 的国内流量全部走代理。两种模式下，`proxy_cache_use_stale` +
 `inactive=30d` 都让 GitHub 不可达时仍有最后一份可用规则。
 
-反代路径上有两条**必须**遵守的约束（踩坑记录见 [incidents.md](incidents.md) `2026-08-19`）：
+反代路径上有两条**必须**遵守的约束（故障记录见 [incidents.md](incidents.md) `2026-08-19`）：
 
 - **必须写 `proxy_ignore_headers Cache-Control Expires`。** 上游回
   `Cache-Control: max-age=300`，nginx 默认尊重上游指令并**完全覆盖** `proxy_cache_valid`。
@@ -613,7 +613,7 @@ serve，必须由同步脚本发布到 `/var/lib/sub-rules/`。
   `updating`。** 该组合会让缓存过期后的第一个请求同步拿到陈旧副本、只在后台回源，而客户端
   「更新规则集」正是单次一次性拉取，于是必定拿到上一版规则。
 
-缓存目录 `/var/cache/nginx/sub-rules` 必须属 `www-data`：`nginx -t` 会夺走它，见
+缓存目录 `/var/cache/nginx/sub-rules` 必须属 `www-data`：`nginx -t` 会改掉它的属主，见
 [incidents.md](incidents.md) `2026-08-10 nginx -t 夺走缓存目录属主`。
 
 ### 9.4 为什么自维护规则由本站提供
@@ -621,7 +621,7 @@ serve，必须由同步脚本发布到 `/var/lib/sub-rules/`。
 Clash 分支的 profile 由本站 `8443` 生成并返回，不经过 GitHub 或 jsdelivr。但客户端
 「更新订阅」不只下载 profile：Mihomo 加载配置时会初始化全部 `rule-providers`，任一规则表
 拉取失败，这次配置加载就失败，客户端保留上一份配置。于是规则表的可达性也是订阅可靠性的
-一部分：规则表拉不到的表现是「订阅更新失败」，不是「分流不准」。
+一部分：规则表拉取失败的表现是「订阅更新失败」，不是「分流不准」。
 
 这排除了两个候选来源：
 
@@ -644,7 +644,7 @@ Clash 分支的 profile 由本站 `8443` 生成并返回，不经过 GitHub 或 
 任何缓存，nginx 直接读发布目录，读到即当前内容。改完规则要尽快生效时开 `--with-rules`。
 
 `--with-rules` 下不直接把 git 工作副本交给 nginx，原因有两个，且都与正确性有关：`/root` 是
-0700，www-data 穿不进去；`git fetch` 合并工作副本与 nginx 读文件并发时，可能读到半套规则。
+0700，www-data 无法进入；`git fetch` 合并工作副本与 nginx 读文件并发时，可能读到半套规则。
 发布目录用独立权限（0755 / 文件 0644）和临时文件 `mv` 解决这两点。
 
 ACL4SSR 的 9 个规则集不跟着自托管，判据是「谁维护、多久更新一次、是否要求改完立刻生效」：

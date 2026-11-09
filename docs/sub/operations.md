@@ -56,7 +56,7 @@
 
 有两种来源，校验与落地流程完全相同，只是原始订阅地址从哪来不同。
 
-**从 3x-ui 直接挑（推荐）：**
+**从 3x-ui 客户端中选择（推荐）：**
 
 ```bash
 sub-manager add --from-xui
@@ -76,7 +76,7 @@ sub-manager add --from-xui
 
 选中后原始订阅地址由 `subId` 推导为 `https://<域名>:<subPort><subPath><subId>`
 （`subPort` / `subPath` 从 `settings` 表读，查不到即 3x-ui 默认值 `2096` / `/sub/`），
-不必手工粘贴，粘贴那一步本来就只是把面板上的同一个值搬过来一遍。
+不必再从面板复制粘贴同一个值。
 
 **手工粘贴（原始订阅不来自本机 3x-ui 时用）：**
 
@@ -92,7 +92,7 @@ YAML、输出不含原始订阅 URL、新 Nginx 配置语法正确，再逐项�
 fragment，整条粘进客户端即可）。地址形态见 [README.md](README.md) §3.4，判定规则见
 [unified-subscription.md](unified-subscription.md) §2。
 
-> **面板增删客户端不会自动改动聚合地址。** 触发权在人手上：新增客户端后跑
+> **面板增删客户端不会自动改动聚合地址。** 触发权在人手上：新增客户端后执行
 > `add --from-xui`，删除客户端后 `list` 会把失去对应客户端的订阅标出来，由你决定是否
 > `remove`。选择手工触发而不是定时器的理由见 §1.8。
 
@@ -175,7 +175,7 @@ sub-manager remove sub-1
 脚本会先打印该订阅的地址，再询问 `[y/n]`，输入 `y` 才删除（大小写均可，直接回车即取消）。
 删除成功后，该订阅的地址立即返回 404，其他订阅不受影响。
 
-> `rotate` / `remove` 作废的只是配置分发通道。客户端已经拉到的配置不会消失，里面的 VLESS
+> `rotate` / `remove` 作废的只是配置分发通道。客户端已经拉取的配置不会消失，里面的 VLESS
 > UUID 仍然有效。要真正收回节点访问，去 3x-ui 面板删掉该客户端或更换 UUID。2096 未收口时，
 > 拿到过聚合地址的人还能从原生分支的响应头读到 `subId`、直连原始订阅，所以
 > 聚合地址泄露也要按 §1.4 一并重置 `subId`。细节见
@@ -188,7 +188,7 @@ sub-manager test          # 全部订阅
 sub-manager test sub-1    # 单条
 ```
 
-测试覆盖源订阅可访问、本地转换成功，以及订阅入口的四发 UA 断言（见
+测试覆盖源订阅可访问、本地转换成功，以及订阅入口的四项 UA 断言（见
 [unified-subscription.md](unified-subscription.md) §7）。输出只报告订阅编号和通过/失败，
 不打印原始 URL 或响应正文。
 
@@ -206,7 +206,7 @@ sub-manager resync
 
 没有订阅时，只要 `private-sub.conf` 存在，resync 照常按当前常量重建它；但状态文件缺失而
 `private-sub.conf` 还在时拒绝执行，因为按空状态重建会让所有订阅地址失效。resync 不重新拉取
-订阅，也不做 §3.2.1 的转换校验；改了模板或 snippets，resync 之后再跑 `sub-manager test`。
+订阅，也不做 §3.2.1 的转换校验；改了模板或 snippets，resync 之后再执行 `sub-manager test`。
 
 若改的是 subconverter 侧的模板或 snippets，**先重启再 resync**，`pref.ini` 的
 `cache_config=300` 会缓存模板：
@@ -223,16 +223,16 @@ systemctl restart subconverter && sub-manager resync
 
 **不做自动同步的定时器**，触发权留在人手上，理由有三：
 
-- **省不掉步骤，反而多一次等待。** 加一个人是「面板加客户端 → `add --from-xui` → 当场拿到
-  地址 → 发给对方」。换成定时器就是「面板加客户端 → 等最多 1 分钟 → `list` → 翻找 →
+- **省不掉步骤，反而多一次等待。** 新增一个用户的流程是「面板加客户端 → `add --from-xui` → 当场拿到
+  地址 → 发给对方」。改用定时器后变成「面板加客户端 → 等最多 1 分钟 → `list` → 查找 →
   复制 → 发给对方」，步数没少，还把「立即拿到地址」换成「稍后自己去查」。
-- **触发源不对。** 新增客户端时人就在终端前，该驱动同步的事件是「敲了命令」，不是「过了
+- **触发源不对。** 新增客户端时操作者就在终端前，该驱动同步的事件是「敲了命令」，不是「过了
   60 秒」。客户端增删约每数天一次，为此每天空转 1440 次不成比例。
 - **自动删除危险且误导。** 删聚合地址不等于收回节点访问。语义见 §1.5：`rotate` / `remove`
-  只作废 Nginx 里的分发 location，UUID 仍在 443 上生效，真正踢人靠面板删 UUID。自动删只完成
+  只作废 Nginx 里的分发 location，UUID 仍在 443 上生效，真正收回访问要在面板删除 UUID。自动删只完成
   不生效的那一半，却制造
-  「已经处理干净」的错觉；随机路径一旦因误判被销毁，重建必然是新路径，那个人所有设备
-  都要重配。
+  「已经处理干净」的错觉；随机路径一旦因误判被销毁，重建必然是新路径，该用户的所有设备
+  都要重新配置。
 
 没有替代品的是**看见漂移**，而那是一个只读报告，不需要定时器。
 
@@ -243,7 +243,7 @@ sub-manager renumber 101
 ```
 
 按现有数字顺序把订阅重排为 `sub-101`、`sub-102`…，并把 `next_id` 设为重排后的下一个编号。
-只改状态文件里的键，`path`、`source_url` 与节点都不动，**订阅地址不变，设备无需重配**。脚本
+只改状态文件里的键，`path`、`source_url` 与节点都不变，**订阅地址不变，设备无需重配**。脚本
 会先打印旧号 → 新号的对照，再询问 `[y/n]`，输入 `y` 才执行（直接回车取消）。
 
 编号平时只增不复用，删除会留下空号。空号不影响任何功能，只是不再分配给新订阅；重排是一次
@@ -251,7 +251,7 @@ sub-manager renumber 101
 
 ## 2. 更新自维护规则
 
-**不需要在服务器执行任何命令。** push 之后多久拉得到，取决于部署时是否加了 `--with-rules`
+**不需要在服务器执行任何命令。** push 之后多久能拉取到，取决于部署时是否加了 `--with-rules`
 （判断方法见 [README.md](README.md) §2）：
 
 ```text
@@ -262,12 +262,12 @@ sub-manager renumber 101
   git push → sub-rules-sync.timer（每分钟）→ /var/lib/sub-rules/ → Clash 客户端点「更新规则集」
 ```
 
-默认部署要等 GitHub 边缘缓存和本机缓存都过期才拉得到新版本，延迟上限见 [design.md](design.md)
+默认部署要等 GitHub 边缘缓存和本机缓存都过期才能拉取到新版本，延迟上限见 [design.md](design.md)
 §9.1，期间单次拉取可能拿到旧版。服务器侧没有办法加速：GitHub 边缘缓存绕不过去，见
 [incidents.md](incidents.md) `2026-08-19 「更新规则集」拿到的永远是上一版`。需要更快就启用
 `--with-rules`。
 
-启用 `--with-rules` 后，延迟上限 = 定时器周期 = **1 分钟**。想跳过这 1 分钟，可在服务器手工跑
+启用 `--with-rules` 后，延迟上限 = 定时器周期 = **1 分钟**。想跳过这 1 分钟，可在服务器手工执行
 一次 `sub-rules-sync`（幂等，随时可执行）。
 
 Clash 客户端侧：`interval: 1800` 是**自动**刷新周期；手动点「更新规则集」（或
@@ -372,7 +372,7 @@ journalctl -u subconverter.service -u nginx.service \
 - `profile.store-selected: true` 存在
 - 节点名不含 `|📊` 流量后缀（确认 `rename` 生效）
 
-`cmd_test_one` 对订阅入口另跑四发 UA 断言（见
+`cmd_test_one` 对订阅入口另执行四项 UA 断言（见
 [unified-subscription.md](unified-subscription.md) §7）。其中三项是本层独有、上面这份清单
 覆盖不到的：`format: text`（由 Nginx `sub_filter` 注入，本地直出里没有）、`Profile-Title`
 与 `Content-Disposition`（两个分支的订阅名，均由 `PROFILE_NAME` 生成，见
@@ -422,7 +422,7 @@ udp: true
 - 未知路径返回 404
 - **原始 3x-ui 订阅路径未出现在返回内容中**
 
-规则端点：`sub-rules-check` 全绿。默认部署两个文件都是 `X-Rule-Source: github`，启用
+规则端点：`sub-rules-check` 全部通过。默认部署两个文件都是 `X-Rule-Source: github`，启用
 `--with-rules` 时是 `X-Rule-Source: local`。
 
 ### 3.3 资源基线
@@ -440,7 +440,7 @@ df -h /
 | Nginx | 约 3.7 MB | 约 5.6 MB |
 
 在 [design.md](design.md) §1 的验证环境上，部署完成时系统仍有约 965 MB available 内存，
-根分区剩余约 15 GB。明显偏离这个量级时值得查。
+根分区剩余约 15 GB。明显偏离这个量级时需要排查。
 
 ## 4. 备份范围
 

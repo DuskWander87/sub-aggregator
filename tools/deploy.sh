@@ -658,7 +658,7 @@ preflight() {
         ref_cert=$(sed -n 's/^[[:space:]]*ssl_certificate[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$psc" | head -n 1)
         ref_key=$(sed -n 's/^[[:space:]]*ssl_certificate_key[[:space:]]\{1,\}\([^;]*\);.*/\1/p' "$psc" | head -n 1)
         if [[ -z $ref_cert || -z $ref_key || ! -s $ref_cert || ! -s $ref_key ]]; then
-            fail "现有 $psc 引用的证书缺失：$(dirname -- "${ref_cert:-$CERT_DIR/fullchain.pem}")。按 docs/sub/certificates.md §4 把证书重新落盘后重跑。"
+            fail "现有 $psc 引用的证书缺失：$(dirname -- "${ref_cert:-$CERT_DIR/fullchain.pem}")。按 docs/sub/certificates.md §4 把证书重新落盘后重新运行。"
         fi
     fi
 

@@ -24,7 +24,7 @@
 | [operations.md](operations.md) | 管理脚本、编号与轮换、检查与验证、备份范围 | 要动手做某件事 | 保持精简，不留历史 |
 | [unified-subscription.md](unified-subscription.md) | 订阅入口：UA 分流规则、两个分支的输出、2096 收口 | 给设备配订阅、或要改分流规则 | §2 判定规则是**单一事实源** |
 | [design.md](design.md) | 环境、选型、配置、安全模型、策略组 / DNS / 规则分发设计 | 要改系统，需要先知道为什么是现在这样 | 改服务器必须同步改 |
-| [incidents.md](incidents.md) | 踩过的坑，按日期倒序 | 「这个症状以前见过吗」 | 只追加，不改旧条目 |
+| [incidents.md](incidents.md) | 历次故障记录，按日期倒序 | 「这个症状以前见过吗」 | 只追加，不改旧条目 |
 
 同目录之外还有 [`../3x-ui/troubleshooting.md`](../3x-ui/troubleshooting.md)，记录一次 3x-ui /
 VLESS Reality 故障排查全过程，全文使用占位符，可公开分享。
@@ -154,12 +154,12 @@ http://127.0.0.1:25500/sub
 
 `emoji=true` 有一条改不掉的行为：**贴国旗时固定插一个空格**（`旗子 + " " + 原名`）。这个
 分隔符是 subconverter 二进制里的字面量，`[emojis]` 段只暴露 `add_emoji`、`remove_old_emoji`
-和规则表三项，没有它的开关；表里写什么都落在空格左边，写空字符串只会让空格跑到最前。
-`rename` 同样删不掉，它跑在贴国旗**之前**，那时空格还不存在（实测：`rename` 里写
+和规则表三项，没有它的开关；表里写什么都落在空格左边，写空字符串只会让空格移到最前。
+`rename` 同样删不掉，它在贴国旗**之前**执行，那时空格还不存在（实测：`rename` 里写
 `🇺🇸 @🇺🇸` 对输出没有任何影响）。因此节点名带这个空格，而策略组名不带；这个不一致是已知
 的，权衡见 [design.md](design.md) §6.2。
 
-改这些参数中的任何一个之后，都要跑 `sub-manager resync`。
+改这些参数中的任何一个之后，都要执行 `sub-manager resync`。
 
 ### 3.4 订阅地址与显示名称
 
@@ -169,7 +169,7 @@ http://127.0.0.1:25500/sub
 https://sub.example.com:8443/<48 位随机 hex>#DuskWander87
 ```
 
-`sub-manager list` 直接输出带 fragment 的完整地址，整条粘进客户端即可。
+`sub-manager list` 直接输出带 fragment 的完整地址，整条粘贴到客户端即可。
 
 客户端订阅卡片上显示的名称默认是 `DuskWander87`，部署时可用 `--profile-name` 改。服务器侧
 只有一个命名来源，客户端侧另有一处：
@@ -178,10 +178,10 @@ https://sub.example.com:8443/<48 位随机 hex>#DuskWander87
 |---|---|---|
 | Clash 家族 | Nginx 的 `Content-Disposition` 响应头 | `sub-manager` 的常量 `PROFILE_NAME`，改完 `resync` |
 | 3x-ui 原生分支 | Nginx 覆盖过的 `Profile-Title` 响应头（值带 `base64:` 前缀） | 同上，`resync` 后两个分支一起变 |
-| Shadowrocket | **URL fragment `#DuskWander87`**，服务器完全管不着 | 客户端里手工填，或粘贴 `list` 输出的完整地址 |
+| Shadowrocket | **URL fragment `#DuskWander87`**，服务器无法控制 | 客户端里手工填，或粘贴 `list` 输出的完整地址 |
 
 前两处都由 `PROFILE_NAME` 生成：Clash 分支的响应由 subconverter 拼装，原生分支则在 Nginx 层
-把上游的 `Profile-Title` 覆盖掉，因此改一个常量跑一次 `resync` 即可。3x-ui 面板的「订阅标题」
+把上游的 `Profile-Title` 覆盖掉，因此改一个常量并执行一次 `resync` 即可。3x-ui 面板的「订阅标题」
 不参与聚合入口的命名，留空也不影响：原生分支在 Nginx 层覆盖上游值，面板值只对直连 `2096`
 的客户端生效，聚合入口的命名只有一个需要人维护的入口。`sub-manager test` 对两个响应头各有一条
 断言，值不一致会报错。
@@ -197,4 +197,4 @@ Shadowrocket 收到了 `Profile-Title` 却不采信，它的订阅名是本地�
 - 名字**保持纯 ASCII**。`filename=` 那一份不做编码，非 ASCII 会失真；原生分支的
   `Profile-Title` 有 base64 保护，但两处要一致，所以按最严的那边来。
 
-改名后跑 `sub-manager resync`，验证见 [operations.md](operations.md) §3.1。
+改名后执行 `sub-manager resync`，验证见 [operations.md](operations.md) §3.1。

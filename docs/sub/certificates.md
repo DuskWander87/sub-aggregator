@@ -7,7 +7,7 @@
 
 HTTPS 除了加密，还要向客户端证明「你连的确实是这个域名」。证书就是这个证明：客户端会检查
 签发者是否受信任、证书上的域名是否匹配、有没有过期。三者任一不满足，客户端就会报证书错误，
-订阅直接拉不下来。
+订阅无法拉取。
 
 本系统只有一个订阅域名，但同一对证书文件被三处共用（端口见 README §3.1）：
 
@@ -17,13 +17,13 @@ HTTPS 除了加密，还要向客户端证明「你连的确实是这个域名�
 | 3x-ui 原生订阅 HTTPS | 面板设置 `subCertFile` / `subKeyFile` |
 | 聚合入口 HTTPS | `sub-manager` 的 `CERT_FILE` 常量 |
 
-所以它不是一个「只有聚合层用」的附属文件。换掉或弄丢它，面板和 2096 也会一起出问题。
+所以它不是一个「只有聚合层用」的附属文件。替换或丢失这对文件，面板和 2096 也会一起出问题。
 
 面板和原生订阅的这四处设置在 3x-ui 面板里配置，`deploy.sh` 不写（脚本对 3x-ui 零写操作）：
 把 `webCertFile` / `webKeyFile` 和 `subCertFile` / `subKeyFile` 指到
-`/root/cert/<域名>/fullchain.pem` 和 `privkey.pem`。配置后重跑 `deploy.sh`，原因见 §2.2。
+`/root/cert/<域名>/fullchain.pem` 和 `privkey.pem`。配置后重新运行 `deploy.sh`，原因见 §2.2。
 
-为什么不能用自签名证书：浏览器和客户端默认不信任它。而且不只是外部客户端——服务器内部的
+为什么不能用自签名证书：浏览器和客户端默认不信任它。而且不只是外部客户端，服务器内部的
 subconverter 和 `sub-manager` 按订阅域名访问 `https://<域名>:2096` 时同样校验证书链，
 自签名证书和私有 CA 都会让这条内部链路失败。
 
@@ -57,9 +57,9 @@ acme.sh --issue
   正式环境，看 acme.sh 存储的证书本身的签发者，不看 conf 里的 `Le_API`；不是时强制重签
   一次，让证书和后续续期都落到这个 CA 上。staging 证书也会被重签。
 - **重签失败**：脚本把 acme.sh 的续期配置还原为部署前的版本并中止，现有证书不变。确认域名
-  解析和 80 端口后重跑；不想换 CA 时按 §4 把现有证书装到证书目录，加 `--no-issue-cert` 重跑。
+  解析和 80 端口后重新运行；不想换 CA 时按 §4 把现有证书装到证书目录，加 `--no-issue-cert` 重新运行。
 - **sudo**：通过 `sudo tools/deploy.sh` 直接运行时，acme.sh 会拒绝签发；需要签发时脚本在
-  preflight 就拒绝，不备份、不安装任何聚合层文件（缺依赖时依赖已在这之前装好），并提示先
+  preflight 就拒绝，不备份、不安装任何聚合层文件（缺依赖时依赖已在这之前安装），并提示先
   `sudo -i` 进入 root shell。
 
 acme.sh 的 conf 不能当作证书来源的证据：跳过签发时它不写 conf，签发失败时却已在下单前写了
@@ -94,11 +94,11 @@ x-ui restart; systemctl reload nginx
 ```
 
 两部分都必要：面板/原生订阅由 x-ui 进程持有证书，聚合入口由 Nginx 持有。缺了 reload，文件换新
-了但进程还在发旧证书，到期后照样报错。hook 按部署当时的面板设置生成，所以面板证书路径改过
-之后要重跑 `deploy.sh`。
+了但进程还在发旧证书，到期后仍会报错。hook 按部署当时的面板设置生成，所以面板证书路径改过
+之后要重新运行 `deploy.sh`。
 
 `--install-cert` 会立即执行传入的 hook。部署过程中脚本只传 `systemctl reload nginx`，不重启
-x-ui、不碰 443；完整 hook 在安装之后写回 acme.sh 的 conf，续期时才执行。面板或原生订阅用的
+x-ui、不影响 443；完整 hook 在安装之后写回 acme.sh 的 conf，续期时才执行。面板或原生订阅用的
 正是这张证书时，部署结束会提示手工 `systemctl restart x-ui`。
 
 **续期方式对齐。**证书安装之后，脚本按 acme.sh conf 的 `Le_Webroot` 对齐续期方式：Nginx 已经
@@ -106,11 +106,11 @@ x-ui、不碰 443；完整 hook 在安装之后写回 acme.sh 的 conf，续期�
 
 | `Le_Webroot` | 处理 |
 |---|---|
-| `/var/www/acme` | 不动 |
-| `dns` / `dns_*` | 不动（DNS 验证不经过 80 端口） |
-| 含逗号（多个方式组合） | 警告，不动 |
+| `/var/www/acme` | 不改写 |
+| `dns` / `dns_*` | 不改写（DNS 验证不经过 80 端口） |
+| 含逗号（多个方式组合） | 警告，不改写 |
 | `no`（standalone）、`alpn`、`apache`、`stateless`、`nginx`、`nginx:*`、其他目录 | 原文件保留为 `.conf.orig`，改为 `/var/www/acme` |
-| 其他 | 警告「未识别」，不动 |
+| 其他 | 警告「未识别」，不改写 |
 
 证书还包含其他域名（`Le_Alt` 不是 `no`）时不改写，只警告：80 端口的挑战路径只服务订阅域名，
 改成 webroot 会让其余域名的验证失败。证书本身已由 Let's Encrypt 签发、而 conf 的 `Le_API` 仍
@@ -119,7 +119,7 @@ x-ui、不碰 443；完整 hook 在安装之后写回 acme.sh 的 conf，续期�
 只有 acme.sh 的安装记录（`Le_RealFullChainPath` / `Le_RealKeyPath`）指向本证书目录时才对齐
 并写 hook。证书安装到别的目录时，脚本只警告：那份证书续期后不会更新 Nginx 用的文件。同一域名
 在 acme.sh 里同时有 RSA 与 ECC 两份配置时，脚本只管理 ECC 那份，并提示清理 RSA 那份。之后在
-3x-ui 面板里重新申请证书导致配置退回 standalone，重跑一次 `deploy.sh` 即可。
+3x-ui 面板里重新申请证书导致配置退回 standalone，重新运行一次 `deploy.sh` 即可。
 
 **certbot。**证书目录在 `/etc/letsencrypt/live/<域名>/` 时，续期由 certbot 负责。脚本安装
 deploy hook `/etc/letsencrypt/renewal-hooks/deploy/sub-aggregator.sh`，内容按上面同样的规则
@@ -169,17 +169,17 @@ systemctl is-active x-ui nginx subconverter        # 使用证书的服务
   `tcp port 80 is already used`；
 - reload hook 丢失，文件已更新但进程仍在发旧证书。
 
-cron 任务把输出丢进 `/dev/null`，续期失败不会留下任何痕迹。怀疑续期有问题时手工跑一次，
+cron 任务把输出丢进 `/dev/null`，续期失败不会留下任何痕迹。怀疑续期有问题时手工执行一次，
 看它停在哪一步：
 
 ```bash
 /root/.acme.sh/acme.sh --cron --home /root/.acme.sh
 ```
 
-续期方式不对时重跑 `deploy.sh`，它按 §2.2 对齐为 webroot；证书已经过期时它会顺带重签。
+续期方式不对时重新运行 `deploy.sh`，它按 §2.2 对齐为 webroot；证书已经过期时它会同时重签。
 
 如果只是 `/root/cert/<域名>/` 下的安装副本被删、而 acme.sh 自己目录里的证书仍在有效期内，
-先把文件重新落盘，再重跑 `deploy.sh`，不需要等续期时间：
+先把文件重新落盘，再重新运行 `deploy.sh`，不需要等续期时间：
 
 ```bash
 /root/.acme.sh/acme.sh --install-cert --ecc -d <域名> \
@@ -188,10 +188,10 @@ cron 任务把输出丢进 `/dev/null`，续期失败不会留下任何痕迹。
   --reloadcmd "systemctl restart x-ui || rc-service x-ui restart; systemctl reload nginx"
 ```
 
-这一步要在重跑 `deploy.sh` 之前做：已有部署的 `/etc/nginx/conf.d/private-sub.conf` 仍引用
-缺失的文件，直接重跑会先在 preflight 被拒绝（「现有 /etc/nginx/conf.d/private-sub.conf 引用的
-证书缺失：<证书目录>。按 docs/sub/certificates.md §4 把证书重新落盘后重跑。」）。
-恢复时 `systemctl reload nginx` 可能因为配置尚未通过校验而报错，文件已经落盘，忽略后重跑
+这一步要在重新运行 `deploy.sh` 之前做：已有部署的 `/etc/nginx/conf.d/private-sub.conf` 仍引用
+缺失的文件，直接重新运行会先在 preflight 被拒绝（「现有 /etc/nginx/conf.d/private-sub.conf 引用的
+证书缺失：<证书目录>。按 docs/sub/certificates.md §4 把证书重新落盘后重新运行。」）。
+恢复时 `systemctl reload nginx` 可能因为配置尚未通过校验而报错，文件已经落盘，忽略后重新运行
 `deploy.sh` 即可。`--install-cert` 会覆盖
 acme.sh 里保存的 reload hook，所以这里按 §2.2 把完整 hook 写回。这条命令会立即执行 hook，
 x-ui 会重启，443 中断几秒。

@@ -31,10 +31,10 @@ Shadowrocket / V2rayN 拿 3x-ui 原生订阅。
 | 无 `t`（或 `?t=` 留空）+ UA 命中白名单 | Clash 配置（转换） |
 | 无 `t`（或 `?t=` 留空）+ 其余一切（含无 UA、浏览器、未知客户端） | 原生订阅（透传） |
 
-两个容易踩空的细节，都实测过：`t` 的值**大小写不敏感**（`?t=Clash`、`?t=CLASH` 一样走转换，
+两个容易出错的细节，都实测过：`t` 的值**大小写不敏感**（`?t=Clash`、`?t=CLASH` 一样走转换，
 这是 Nginx `map` 对字符串键的默认行为）；但**拼错的值不会退回 UA 判定**，`?t=yaml` 配 Clash
-UA 拿到的是原生订阅，因为 map 直接落到 `default "raw"`。要 Clash 就写对 `clash`，不确定就
-干脆别带 `t`。
+UA 拿到的是原生订阅，因为 map 直接落到 `default "raw"`。需要 Clash 配置时写对 `clash`，不确定时
+不要带 `t`。
 
 UA 白名单（脚本常量 `UA_CLASH_PATTERN`，大小写不敏感）：
 
@@ -69,7 +69,7 @@ UA 白名单（脚本常量 `UA_CLASH_PATTERN`，大小写不敏感）：
 （那是 Clash 分支的取名方式）。命名细节见 [README.md](README.md) §3.4。
 
 两个分支都加 `Vary: User-Agent`。**这条不能少**：同一个 URL 按 UA 返回两种格式，缺了它
-客户端本地缓存或任何中间缓存都可能把 Clash 配置喂给 Shadowrocket。
+客户端本地缓存或任何中间缓存都可能把 Clash 配置返回给 Shadowrocket。
 
 ### 3.1 两个每次请求都变的值
 
@@ -94,8 +94,8 @@ YAML，`Shadowrocket/*` 返回 Base64，未知 UA 返回 **HTTP 400 `Invalid tar
    自动更新周期靠前者；
 4. 未知 UA 直接 400，浏览器打开也是 400。
 
-原生分支必须与 3x-ui 的原始输出完全一致，没有退路。第 1、2 条动的是 Reality 握手参数，
-正是 [`../3x-ui/troubleshooting.md`](../3x-ui/troubleshooting.md) 整篇在讲的那类坑。
+原生分支必须与 3x-ui 的原始输出完全一致，这一点不能妥协。第 1、2 条动的是 Reality 握手参数，
+正是 [`../3x-ui/troubleshooting.md`](../3x-ui/troubleshooting.md) 整篇在讲的那类问题。
 
 `target=auto` 的失败方向也更差：Nginx 分流在识别失败时退回原生订阅，`target=auto` 直接
 400。
@@ -135,9 +135,9 @@ return 419;
 
 - **承接 location 必须是精确匹配 + `internal`，不能用命名 location（`@name`）。** 命名
   location 里的 `proxy_pass` 不允许带 URI 部分，而两个后端地址都必须带 URI（转换后端要带
-  一长串查询参数，原生后端要带 `subId` 路径）。第一版就是踩了这个才 `nginx -t` 失败。
+  一长串查询参数，原生后端要带 `subId` 路径）。最初的实现就因此未通过 `nginx -t`。
 - **`if` 里只允许 `return`。** 这是 nginx 官方认可的安全用法；把 `proxy_pass` 写进 `if`
-  才是那个著名的坑。
+  才是常见的错误用法。
 - **`internal` 保证这两个路径不能从公网直接访问**，外部请求返回 404。
 
 原生分支的回源地址：源订阅的域名如果就是本机域名，一律改走 `https://127.0.0.1:<端口>`，
@@ -155,7 +155,7 @@ return 419;
 地址：
 
 - 未收口：原始订阅地址在公网可用。`rotate` 换掉聚合路径收不回它；只换 UUID 也不够，对方从
-  原始订阅能直接拉到新 UUID。收回访问要在 3x-ui 删掉该客户端，或同时更换 UUID 与 `subId`。
+  原始订阅能直接拉取到新 UUID。收回访问要在 3x-ui 删掉该客户端，或同时更换 UUID 与 `subId`。
 - 收口后：原始订阅地址只在本机可达，在 3x-ui 删掉该客户端或更换 UUID 即可。
 
 两种情况下 `rotate` / `remove` 都只作废聚合地址，已拉取配置里的 UUID 仍然有效。
@@ -172,7 +172,7 @@ return 419;
 ```
 
 映射只改解析结果，SNI、Host 和证书校验都不变。没有这条映射，Clash 分支会因 subconverter
-连不上 2096 而报「本地转换失败」。映射在收口前加上也无妨，监听所有地址时回环同样可达，所以
+连不上 2096 而报「本地转换失败」。映射可以在收口前加上，监听所有地址时回环同样可达，所以
 先加映射、再改 `subListen`，中间不会断。原生分支和 `sub-manager` 自己拉取原始订阅时本来就走
 `127.0.0.1`，不依赖这条映射。
 
@@ -188,21 +188,21 @@ sub-manager test         # 全部订阅通过
 ## 7. 验证
 
 `sub-manager test`（全部订阅）或 `sub-manager test sub-N`（单个）对每个订阅
-地址跑四发断言：
+地址执行四项断言：
 
 | 请求 | 期望 |
 |---|---|
 | `-A "ClashMetaForAndroid/2.11"` | 含 `proxies:`、代理节点、`store-selected: true`、**`format: text`**；无 `\|📊` 残留；不含原始订阅 URL |
 | `-A "Shadowrocket/2.2.65"` | 与直连原始订阅逐字节相同（§3.1 两处归一化后），且响应含 `Profile-Update-Interval` 与 `Vary: User-Agent` |
-| `-A "curl/8.5.0"`，不带 `t` | 与直连原始订阅逐字节相同（同样归一化后），确认未知 UA 落到原生分支；这一发不重复头断言 |
-| `-A "curl/8.5.0"` + `?t=clash` | 与第一发**逐字节相同**，且响应头含 `Content-Disposition` 订阅名 |
+| `-A "curl/8.5.0"`，不带 `t` | 与直连原始订阅逐字节相同（同样归一化后），确认未知 UA 落到原生分支；这个请求不重复头断言 |
+| `-A "curl/8.5.0"` + `?t=clash` | 与第一个请求**逐字节相同**，且响应头含 `Content-Disposition` 订阅名 |
 
 原生分支那两发用「逐字节相同」，比逐条 grep 强：`spx` 被改写、参数被注入这类问题会直接
 暴露，不需要为每个字段单独写断言。Clash 分支没有可以逐字节比对的参照物，因此用内容断言，
 再用 `?t=clash` 与 UA 命中互为参照，守住两条进入该分支的路径不漂移。
 
 其中 `format: text` 由 Nginx `sub_filter` 注入，本机 subconverter 直出里没有，所以只能在这
-一层断言：它守的是 [incidents.md](incidents.md) `2026-08-08` 那个坑。两个名称 header
+一层断言：它防止的是 [incidents.md](incidents.md) `2026-08-08` 那个问题再次出现。两个名称 header
 （`Profile-Title` 与 `Content-Disposition`）的值都来自 `PROFILE_NAME`，Nginx 覆盖失效或常量
 与预期不一致都会在这里报错。
 
@@ -217,5 +217,5 @@ done
 前 10 个字符是 `port: 7890` 的走了 Clash 分支，是 `dmxlc3M6Ly`（Base64 编码的 `vless://`
 开头）的走了原生分支。截到 10 个字符为止，再往后就带上 UUID 了，不要贴进文档。
 
-这四发断言做过红灯验证：把 UA 白名单改成不可能命中、删掉 raw 分支的 `Vary` 头、把 raw
-分支错接到转换后端，三次都被对应断言拦下；恢复后复测全绿。
+这四项断言做过红灯验证：把 UA 白名单改成不可能命中、删掉 raw 分支的 `Vary` 头、把 raw
+分支错接到转换后端，三次都被对应断言拦下；恢复后复测全部通过。
