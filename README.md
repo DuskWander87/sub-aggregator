@@ -97,7 +97,7 @@ sub-aggregator 面向已经运行 3x-ui 的单台服务器，供个人或少数�
 ## 安全与边界
 
 - **订阅地址就是凭据。** 访问该地址即可拉取节点，不需要账号或口令；泄露后用 `sub-manager rotate` 换一条，旧地址立即失效。
-- **更换地址不等于收回访问权限。** 已经拉取的配置里，节点的 UUID 仍然可用。要真正收回访问，去 3x-ui 删掉这个客户端；只换 UUID 的话，没收口 2096 时还要一起重置它的 subId，原因见 [unified-subscription.md](docs/sub/unified-subscription.md) §6。
+- **换地址不收回节点访问。** 已经拉取的配置里，节点的 UUID 仍然可用，`rotate` 只让分发地址失效。要真正收回访问，在 3x-ui 面板删除该客户端，机制与步骤见 [unified-subscription.md](docs/sub/unified-subscription.md) §6。
 - **仓库不含真实凭据，也不构成安全承诺。** 域名、路径均为占位符；照搬到自己的服务器时，域名、证书和访问控制需要自行核对。
 
 ## 卸载
